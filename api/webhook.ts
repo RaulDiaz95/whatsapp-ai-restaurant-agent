@@ -9,10 +9,59 @@ function getQueryParam(value: string | string[] | undefined): string {
 }
 
 function getVerifyToken(): string {
-  return process.env.WHATSAPP_VERIFY_TOKEN || "restaurant_verify_token";
+  return process.env.VERIFY_TOKEN || "";
 }
 
-export default function handler(req: VercelRequest, res: VercelResponse): void {
+type WhatsAppWebhookBody = {
+  entry?: Array<{
+    changes?: Array<{
+      value?: {
+        messages?: Array<{
+          from?: string;
+          text?: {
+            body?: string;
+          };
+        }>;
+      };
+    }>;
+  }>;
+};
+
+async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
+  const token = process.env.WHATSAPP_TOKEN || "";
+  const phoneNumberId = process.env.PHONE_NUMBER_ID || "";
+
+  if (!token || !phoneNumberId) {
+    console.error("Missing WHATSAPP_TOKEN or PHONE_NUMBER_ID");
+    return;
+  }
+
+  const response = await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: {
+        body: text,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    console.error("Failed to send WhatsApp message", {
+      status: response.status,
+      body: errorText,
+    });
+  }
+}
+
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   try {
     if (req.method === "GET") {
       const mode = getQueryParam(req.query["hub.mode"]);
@@ -29,10 +78,17 @@ export default function handler(req: VercelRequest, res: VercelResponse): void {
     }
 
     if (req.method === "POST") {
+      const body = (req.body ?? {}) as WhatsAppWebhookBody;
+      const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+
       try {
-        console.log(JSON.stringify(req.body ?? {}, null, 2));
+        console.log(JSON.stringify(body, null, 2));
       } catch {
         console.log("Received WhatsApp webhook event, but body could not be stringified.");
+      }
+
+      if (message?.from) {
+        await sendWhatsAppMessage(message.from, "Hola 👋 gracias por tu mensaje");
       }
 
       res.status(200).json({ status: "ok" });
