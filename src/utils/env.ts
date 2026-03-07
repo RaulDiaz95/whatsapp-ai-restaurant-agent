@@ -11,12 +11,20 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().min(1, "OPENAI_API_KEY is required"),
 });
 
-const parsedEnv = envSchema.safeParse(process.env);
+let cachedEnv: z.infer<typeof envSchema> | null = null;
 
-if (!parsedEnv.success) {
-  const issues = parsedEnv.error.issues.map((issue) => issue.message).join(", ");
-  throw new Error(`Invalid environment configuration: ${issues}`);
+export function getEnv(): z.infer<typeof envSchema> {
+  if (cachedEnv) {
+    return cachedEnv;
+  }
+
+  const parsedEnv = envSchema.safeParse(process.env);
+
+  if (!parsedEnv.success) {
+    const issues = parsedEnv.error.issues.map((issue) => issue.message).join(", ");
+    throw new Error(`Invalid environment configuration: ${issues}`);
+  }
+
+  cachedEnv = parsedEnv.data;
+  return cachedEnv;
 }
-
-export const env = parsedEnv.data;
-

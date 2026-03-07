@@ -1,11 +1,13 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
-import { env } from "../src/utils/env";
+import { getEnv } from "../src/utils/env";
 import { createLogger } from "../src/services/logger";
 
 const logger = createLogger("webhook");
 
 export default function handler(req: VercelRequest, res: VercelResponse): void {
+  const env = getEnv();
+
   logger.info("Webhook placeholder invoked", {
     method: req.method,
     hasVerificationToken: Boolean(env.WHATSAPP_VERIFY_TOKEN),
@@ -15,4 +17,3 @@ export default function handler(req: VercelRequest, res: VercelResponse): void {
     message: "Webhook handler placeholder",
   });
 }
-
