@@ -1,5 +1,4 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { Redis } from "@upstash/redis";
 import { sushiMenu } from "../lib/sushiMenu";
 
 type SushiMenuItem = (typeof sushiMenu)[number];
@@ -11,22 +10,7 @@ type CartItem = {
   quantity: number;
 };
 
-type CartStore = Record<string, CartItem[]>;
-type UserLockStore = Map<string, Promise<void>>;
-
-const globalRedisStore = globalThis as typeof globalThis & {
-  __sushiRedis__?: Redis;
-  __sushiCartLocks__?: UserLockStore;
-};
-
-const redis =
-  globalRedisStore.__sushiRedis__ ??
-  (globalRedisStore.__sushiRedis__ = new Redis({
-    url: process.env.UPSTASH_REDIS_REST_URL || "",
-    token: process.env.UPSTASH_REDIS_REST_TOKEN || "",
-  }));
-
-const cartLocks = globalRedisStore.__sushiCartLocks__ ?? (globalRedisStore.__sushiCartLocks__ = new Map());
+const carts: Record<string, CartItem[]> = {};
 
 function getQueryParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -83,61 +67,31 @@ function parseMenuSelection(message: string): { itemIndex: number; quantity: num
   return { itemIndex, quantity };
 }
 
-function getCartKey(userId: string): string {
-  return `cart:${userId}`;
+function getCart(userId: string): CartItem[] {
+  return carts[userId] || [];
 }
 
-async function getCart(userId: string): Promise<CartItem[]> {
-  const cart = await redis.get<CartItem[]>(getCartKey(userId));
-  return Array.isArray(cart) ? cart : [];
-}
+function addToCart(userId: string, product: SushiMenuItem, quantity: number): CartItem[] {
+  const userCart = [...getCart(userId)];
+  const existingItem = userCart.find((item) => item.id === product.id);
 
-async function withUserCartLock<T>(userId: string, operation: () => T | Promise<T>): Promise<T> {
-  const previous = cartLocks.get(userId) ?? Promise.resolve();
-  let releaseLock: (() => void) | undefined;
-
-  const current = new Promise<void>((resolve) => {
-    releaseLock = resolve;
-  });
-
-  cartLocks.set(userId, previous.then(() => current));
-  await previous;
-
-  try {
-    return await operation();
-  } finally {
-    releaseLock?.();
-
-    if (cartLocks.get(userId) === current) {
-      cartLocks.delete(userId);
-    }
+  if (existingItem) {
+    existingItem.quantity += quantity;
+  } else {
+    userCart.push({
+      id: product.id,
+      name: product.name,
+      price: product.price,
+      quantity,
+    });
   }
+
+  carts[userId] = userCart;
+  return userCart;
 }
 
-async function addToCart(userId: string, product: SushiMenuItem, quantity: number): Promise<CartItem[]> {
-  return withUserCartLock(userId, async () => {
-    const existingCart = await getCart(userId);
-    const nextCart = [...existingCart];
-    const existingItem = nextCart.find((item) => item.id === product.id);
-
-    if (existingItem) {
-      existingItem.quantity += quantity;
-    } else {
-      nextCart.push({
-        id: product.id,
-        name: product.name,
-        price: product.price,
-        quantity,
-      });
-    }
-
-    await redis.set(getCartKey(userId), nextCart);
-    return nextCart;
-  });
-}
-
-async function getCartSummary(userId: string): Promise<string> {
-  const cart = await getCart(userId);
+function getCartSummary(userId: string): string {
+  const cart = getCart(userId);
   return cart.length > 0 ? formatCart(cart) : "Tu carrito esta vacio";
 }
 
@@ -300,10 +254,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           const item = sushiMenu[itemIndex];
 
           if (item) {
-            const updatedCart = await addToCart(to, item, selection.quantity);
-            const addedItem = updatedCart.find((cartItem) => cartItem.id === item.id);
-            const quantityText = addedItem ? ` (x${selection.quantity})` : "";
-            await sendWhatsAppMessage(to, `Agregaste ${item.name} 🍣${quantityText}`);
+            addToCart(to, item, selection.quantity);
+            await sendWhatsAppMessage(to, `Agregaste ${item.name} 🍣 (x${selection.quantity})`);
           } else {
             await sendWhatsAppMessage(to, "Ese numero no existe en el menu");
           }
@@ -313,16 +265,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }
 
         if (normalizedMessage === "carrito") {
-          const cartText = await getCartSummary(to);
+          const cartText = getCartSummary(to);
           await sendWhatsAppMessage(to, cartText);
           res.status(200).json({ status: "ok" });
           return;
         }
 
         if (normalizedMessage === "cancelar") {
-          await withUserCartLock(to, async () => {
-            await redis.del(getCartKey(to));
-          });
+          delete carts[to];
           await sendWhatsAppMessage(to, "Tu carrito ha sido cancelado");
           res.status(200).json({ status: "ok" });
           return;
