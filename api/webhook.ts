@@ -27,6 +27,20 @@ type ParsedSelection = {
   modifiers: string[];
 };
 
+type CartEditCommand =
+  | {
+      type: "remove";
+      itemIndex: number;
+    }
+  | {
+      type: "update";
+      itemIndex: number;
+      quantity: number;
+    }
+  | {
+      type: "clear";
+    };
+
 const carts: Record<string, CartItem[]> = {};
 
 function getQueryParam(value: string | string[] | undefined): string {
@@ -138,6 +152,37 @@ function parseMenuSelection(message: string): ParsedSelection | null {
   return { itemIndex, quantity, extras, modifiers };
 }
 
+function parseCartEditCommand(message: string): CartEditCommand | null {
+  const normalized = normalizeText(message);
+
+  if (normalized === "vaciar carrito" || normalized === "limpiar carrito") {
+    return { type: "clear" };
+  }
+
+  const removeMatch = normalized.match(/^(quitar|eliminar)\s+(\d+)$/);
+
+  if (removeMatch) {
+    const itemIndex = Number(removeMatch[2]);
+
+    if (Number.isInteger(itemIndex) && itemIndex > 0) {
+      return { type: "remove", itemIndex };
+    }
+  }
+
+  const updateMatch = normalized.match(/^(cambiar|actualizar)\s+(\d+)\s*x\s*(\d+)$/);
+
+  if (updateMatch) {
+    const itemIndex = Number(updateMatch[2]);
+    const quantity = Number(updateMatch[3]);
+
+    if (Number.isInteger(itemIndex) && itemIndex > 0 && Number.isInteger(quantity) && quantity > 0) {
+      return { type: "update", itemIndex, quantity };
+    }
+  }
+
+  return null;
+}
+
 function getCart(userId: string): CartItem[] {
   return carts[userId] || [];
 }
@@ -200,6 +245,39 @@ function addToCart(userId: string, product: SushiMenuItem, quantity: number, ext
   userCart.push(createdItem);
   carts[userId] = userCart;
   return createdItem;
+}
+
+function removeCartItem(userId: string, itemIndex: number): CartItem | null {
+  const userCart = [...getCart(userId)];
+  const index = itemIndex - 1;
+
+  if (index < 0 || index >= userCart.length) {
+    return null;
+  }
+
+  const [removedItem] = userCart.splice(index, 1);
+  carts[userId] = userCart;
+  return removedItem ?? null;
+}
+
+function updateCartItemQuantity(userId: string, itemIndex: number, quantity: number): CartItem | null {
+  const userCart = [...getCart(userId)];
+  const index = itemIndex - 1;
+
+  if (index < 0 || index >= userCart.length) {
+    return null;
+  }
+
+  userCart[index] = {
+    ...userCart[index],
+    quantity,
+  };
+  carts[userId] = userCart;
+  return userCart[index];
+}
+
+function clearCart(userId: string): void {
+  delete carts[userId];
 }
 
 function getCartSummary(userId: string): string {
@@ -374,6 +452,41 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
+        const editCommand = parseCartEditCommand(userMessage);
+
+        if (editCommand) {
+          if (editCommand.type === "clear") {
+            clearCart(to);
+            await sendWhatsAppMessage(to, "Tu carrito ha sido vaciado 🧹");
+            res.status(200).json({ status: "ok" });
+            return;
+          }
+
+          if (editCommand.type === "remove") {
+            const removedItem = removeCartItem(to, editCommand.itemIndex);
+
+            if (!removedItem) {
+              await sendWhatsAppMessage(to, "Ese producto no existe en tu carrito");
+            } else {
+              await sendWhatsAppMessage(to, `Eliminaste ${removedItem.name} del carrito`);
+            }
+
+            res.status(200).json({ status: "ok" });
+            return;
+          }
+
+          const updatedItem = updateCartItemQuantity(to, editCommand.itemIndex, editCommand.quantity);
+
+          if (!updatedItem) {
+            await sendWhatsAppMessage(to, "Ese producto no existe en tu carrito");
+          } else {
+            await sendWhatsAppMessage(to, `Actualizaste ${updatedItem.name} a x${editCommand.quantity}`);
+          }
+
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
         const selection = parseMenuSelection(userMessage);
 
         if (selection) {
@@ -400,7 +513,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }
 
         if (normalizedMessage === "cancelar") {
-          delete carts[to];
+          clearCart(to);
           await sendWhatsAppMessage(to, "Tu carrito ha sido cancelado");
           res.status(200).json({ status: "ok" });
           return;
