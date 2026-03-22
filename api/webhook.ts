@@ -1,6 +1,8 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { sushiMenu } from "../lib/sushiMenu";
 
+const carts: Record<string, any[]> = {};
+
 function getQueryParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
     return value[0] ?? "";
@@ -31,6 +33,12 @@ type WhatsAppWebhookBody = {
 function formatMenu(menu: typeof sushiMenu): string {
   const items = menu.map((item, index) => `${index + 1}. ${item.name} - $${item.price}`);
   return ["🍣 MENÚ SUSHI", "", ...items].join("\n");
+}
+
+function formatCart(cart: any[]): string {
+  const items = cart.map((item, index) => `${index + 1}. ${item.name} - $${item.price}`);
+  const total = cart.reduce((sum, item) => sum + item.price, 0);
+  return ["🛒 TU CARRITO", "", ...items, "", `Total: $${total}`].join("\n");
 }
 
 async function generateAIResponse(userMessage: string): Promise<string> {
@@ -173,13 +181,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (message?.from && message.text?.body) {
         const to = message.from;
         const userMessage = message.text.body;
+        const normalizedMessage = userMessage.trim().toLowerCase();
         console.log("Sending message to:", to);
         console.log("User message:", userMessage);
 
-        if (userMessage.trim().toLowerCase() === "menu") {
+        if (normalizedMessage === "menu") {
           console.log("User requested menu");
           const menuText = formatMenu(sushiMenu);
           await sendWhatsAppMessage(to, menuText);
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
+        if (/^\d+$/.test(normalizedMessage)) {
+          const itemIndex = Number(normalizedMessage) - 1;
+          const item = sushiMenu[itemIndex];
+
+          if (item) {
+            if (!carts[to]) {
+              carts[to] = [];
+            }
+
+            carts[to].push(item);
+            await sendWhatsAppMessage(to, `Agregaste ${item.name} 🍣`);
+          } else {
+            await sendWhatsAppMessage(to, "Ese numero no existe en el menu");
+          }
+
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
+        if (normalizedMessage === "carrito") {
+          const cart = carts[to] || [];
+          const cartText = cart.length > 0 ? formatCart(cart) : "Tu carrito esta vacio";
+          await sendWhatsAppMessage(to, cartText);
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
+        if (normalizedMessage === "cancelar") {
+          delete carts[to];
+          await sendWhatsAppMessage(to, "Tu carrito ha sido cancelado");
           res.status(200).json({ status: "ok" });
           return;
         }
