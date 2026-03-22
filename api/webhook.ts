@@ -88,7 +88,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
 
       if (message?.from) {
-        await sendWhatsAppMessage(message.from, "Hola 👋 gracias por tu mensaje");
+        const to = message.from;
+        console.log("Sending message to:", to);
+        await sendWhatsAppMessage(to, "Hola 👋 gracias por tu mensaje");
       }
 
       res.status(200).json({ status: "ok" });
