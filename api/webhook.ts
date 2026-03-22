@@ -1,7 +1,25 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { sushiMenu } from "../lib/sushiMenu";
 
-const carts: Record<string, any[]> = {};
+type SushiMenuItem = (typeof sushiMenu)[number];
+
+type CartItem = {
+  id: string;
+  name: string;
+  price: number;
+  qty: number;
+};
+
+type CartStore = Record<string, CartItem[]>;
+type UserLockStore = Map<string, Promise<void>>;
+
+const globalCartStore = globalThis as typeof globalThis & {
+  __sushiCarts__?: CartStore;
+  __sushiCartLocks__?: UserLockStore;
+};
+
+const carts = globalCartStore.__sushiCarts__ ?? (globalCartStore.__sushiCarts__ = {});
+const cartLocks = globalCartStore.__sushiCartLocks__ ?? (globalCartStore.__sushiCartLocks__ = new Map());
 
 function getQueryParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -35,10 +53,63 @@ function formatMenu(menu: typeof sushiMenu): string {
   return ["🍣 MENÚ SUSHI", "", ...items].join("\n");
 }
 
-function formatCart(cart: any[]): string {
-  const items = cart.map((item, index) => `${index + 1}. ${item.name} - $${item.price}`);
-  const total = cart.reduce((sum, item) => sum + item.price, 0);
+function formatCart(cart: CartItem[]): string {
+  const items = cart.map((item, index) => `${index + 1}. ${item.name} x${item.qty} - $${item.price * item.qty}`);
+  const total = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
   return ["🛒 TU CARRITO", "", ...items, "", `Total: $${total}`].join("\n");
+}
+
+function getCart(userId: string): CartItem[] {
+  return carts[userId] ?? [];
+}
+
+async function withUserCartLock<T>(userId: string, operation: () => T | Promise<T>): Promise<T> {
+  const previous = cartLocks.get(userId) ?? Promise.resolve();
+  let releaseLock: (() => void) | undefined;
+
+  const current = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+
+  cartLocks.set(userId, previous.then(() => current));
+  await previous;
+
+  try {
+    return await operation();
+  } finally {
+    releaseLock?.();
+
+    if (cartLocks.get(userId) === current) {
+      cartLocks.delete(userId);
+    }
+  }
+}
+
+async function addToCart(userId: string, product: SushiMenuItem): Promise<CartItem[]> {
+  return withUserCartLock(userId, async () => {
+    const existingCart = getCart(userId);
+    const nextCart = [...existingCart];
+    const existingItem = nextCart.find((item) => item.id === product.id);
+
+    if (existingItem) {
+      existingItem.qty += 1;
+    } else {
+      nextCart.push({
+        id: product.id,
+        name: product.name,
+        price: product.price,
+        qty: 1,
+      });
+    }
+
+    carts[userId] = nextCart;
+    return nextCart;
+  });
+}
+
+function getCartSummary(userId: string): string {
+  const cart = getCart(userId);
+  return cart.length > 0 ? formatCart(cart) : "Tu carrito esta vacio";
 }
 
 async function generateAIResponse(userMessage: string): Promise<string> {
@@ -198,12 +269,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           const item = sushiMenu[itemIndex];
 
           if (item) {
-            if (!carts[to]) {
-              carts[to] = [];
-            }
-
-            carts[to].push(item);
-            await sendWhatsAppMessage(to, `Agregaste ${item.name} 🍣`);
+            const updatedCart = await addToCart(to, item);
+            const addedItem = updatedCart.find((cartItem) => cartItem.id === item.id);
+            const quantityText = addedItem ? ` (x${addedItem.qty})` : "";
+            await sendWhatsAppMessage(to, `Agregaste ${item.name} 🍣${quantityText}`);
           } else {
             await sendWhatsAppMessage(to, "Ese numero no existe en el menu");
           }
@@ -213,15 +282,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }
 
         if (normalizedMessage === "carrito") {
-          const cart = carts[to] || [];
-          const cartText = cart.length > 0 ? formatCart(cart) : "Tu carrito esta vacio";
+          const cartText = getCartSummary(to);
           await sendWhatsAppMessage(to, cartText);
           res.status(200).json({ status: "ok" });
           return;
         }
 
         if (normalizedMessage === "cancelar") {
-          delete carts[to];
+          await withUserCartLock(to, async () => {
+            delete carts[to];
+          });
           await sendWhatsAppMessage(to, "Tu carrito ha sido cancelado");
           res.status(200).json({ status: "ok" });
           return;
