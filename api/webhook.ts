@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { sushiMenu } from "../lib/sushiMenu";
 
 function getQueryParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -26,6 +27,11 @@ type WhatsAppWebhookBody = {
     }>;
   }>;
 };
+
+function formatMenu(menu: typeof sushiMenu): string {
+  const items = menu.map((item, index) => `${index + 1}. ${item.name} - $${item.price}`);
+  return ["🍣 MENÚ SUSHI", "", ...items].join("\n");
+}
 
 async function generateAIResponse(userMessage: string): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY || "";
@@ -169,6 +175,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const userMessage = message.text.body;
         console.log("Sending message to:", to);
         console.log("User message:", userMessage);
+
+        if (userMessage.trim().toLowerCase() === "menu") {
+          console.log("User requested menu");
+          const menuText = formatMenu(sushiMenu);
+          await sendWhatsAppMessage(to, menuText);
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
         const reply = await generateAIResponse(userMessage);
         console.log("AI reply:", reply);
         await sendWhatsAppMessage(to, reply);
