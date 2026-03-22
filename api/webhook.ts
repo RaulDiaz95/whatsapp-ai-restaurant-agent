@@ -1,13 +1,30 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { sushiMenu } from "../lib/sushiMenu";
 
-type SushiMenuItem = (typeof sushiMenu)[number];
+type SushiExtra = {
+  name: string;
+  price: number;
+};
+
+type SushiMenuItem = (typeof sushiMenu)[number] & {
+  extras?: SushiExtra[];
+  modifiers?: string[];
+};
 
 type CartItem = {
   id: string;
   name: string;
-  price: number;
+  basePrice: number;
   quantity: number;
+  extras: SushiExtra[];
+  modifiers: string[];
+};
+
+type ParsedSelection = {
+  itemIndex: number;
+  quantity: number;
+  extras: string[];
+  modifiers: string[];
 };
 
 const carts: Record<string, CartItem[]> = {};
@@ -39,19 +56,51 @@ type WhatsAppWebhookBody = {
   }>;
 };
 
+function normalizeText(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function formatMenu(menu: typeof sushiMenu): string {
   const items = menu.map((item, index) => `${index + 1}. ${item.name} - $${item.price}`);
   return ["🍣 MENÚ SUSHI", "", ...items].join("\n");
 }
 
-function formatCart(cart: CartItem[]): string {
-  const items = cart.map((item, index) => `${index + 1}. ${item.name} x${item.quantity} - $${item.price * item.quantity}`);
-  const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  return ["🛒 TU CARRITO", "", ...items, "", `Total: $${total}`].join("\n");
+function getUnitPrice(item: CartItem): number {
+  const extrasTotal = item.extras.reduce((sum, extra) => sum + extra.price, 0);
+  return item.basePrice + extrasTotal;
 }
 
-function parseMenuSelection(message: string): { itemIndex: number; quantity: number } | null {
-  const match = message.trim().match(/^(\d+)(?:\s*x\s*(\d+))?$/i);
+function formatCart(cart: CartItem[]): string {
+  const lines: string[] = ["🛒 TU CARRITO", ""];
+  let total = 0;
+
+  cart.forEach((item, index) => {
+    const unitPrice = getUnitPrice(item);
+    const lineTotal = unitPrice * item.quantity;
+    total += lineTotal;
+
+    lines.push(`${index + 1}. ${item.name} x${item.quantity} - $${lineTotal}`);
+
+    item.extras.forEach((extra) => {
+      lines.push(`   + ${extra.name} (+$${extra.price})`);
+    });
+
+    item.modifiers.forEach((modifier) => {
+      lines.push(`   - ${modifier}`);
+    });
+  });
+
+  lines.push("", `Total: $${total}`);
+  return lines.join("\n");
+}
+
+function parseMenuSelection(message: string): ParsedSelection | null {
+  const match = message.trim().match(/^(\d+)(?:\s*x\s*(\d+))?(.*)$/i);
 
   if (!match) {
     return null;
@@ -59,40 +108,118 @@ function parseMenuSelection(message: string): { itemIndex: number; quantity: num
 
   const itemIndex = Number(match[1]);
   const quantity = match[2] ? Number(match[2]) : 1;
+  const trailing = (match[3] || "").trim();
 
   if (!Number.isInteger(itemIndex) || itemIndex < 1 || !Number.isInteger(quantity) || quantity < 1) {
     return null;
   }
 
-  return { itemIndex, quantity };
+  const extras: string[] = [];
+  const modifiers: string[] = [];
+  const tokenRegex = /(sin|con\s+extra|extra)\s+(.+?)(?=\s+(?:sin|con\s+extra|extra)\s+|$)/gi;
+
+  for (const tokenMatch of trailing.matchAll(tokenRegex)) {
+    const command = normalizeText(tokenMatch[1] || "");
+    const value = (tokenMatch[2] || "").trim();
+
+    if (!value) {
+      continue;
+    }
+
+    if (command === "sin") {
+      modifiers.push(`sin ${value}`);
+      continue;
+    }
+
+    const extraName = value.toLowerCase().startsWith("extra ") ? value : `extra ${value}`;
+    extras.push(extraName);
+  }
+
+  return { itemIndex, quantity, extras, modifiers };
 }
 
 function getCart(userId: string): CartItem[] {
   return carts[userId] || [];
 }
 
-function addToCart(userId: string, product: SushiMenuItem, quantity: number): CartItem[] {
+function resolveExtra(product: SushiMenuItem, requestedExtra: string): SushiExtra | null {
+  const availableExtras = product.extras || [];
+  const normalizedRequested = normalizeText(requestedExtra);
+
+  return (
+    availableExtras.find((extra) => normalizeText(extra.name) === normalizedRequested) ||
+    availableExtras.find((extra) => normalizeText(extra.name.replace(/^extra\s+/i, "")) === normalizedRequested.replace(/^extra\s+/i, "")) ||
+    null
+  );
+}
+
+function areSameConfiguration(left: CartItem, right: Omit<CartItem, "quantity">): boolean {
+  if (left.id !== right.id) {
+    return false;
+  }
+
+  const leftExtras = left.extras.map((extra) => normalizeText(extra.name)).sort();
+  const rightExtras = right.extras.map((extra) => normalizeText(extra.name)).sort();
+  const leftModifiers = left.modifiers.map(normalizeText).sort();
+  const rightModifiers = right.modifiers.map(normalizeText).sort();
+
+  return (
+    JSON.stringify(leftExtras) === JSON.stringify(rightExtras) &&
+    JSON.stringify(leftModifiers) === JSON.stringify(rightModifiers)
+  );
+}
+
+function addToCart(userId: string, product: SushiMenuItem, quantity: number, extraNames: string[], modifiers: string[]): CartItem {
   const userCart = [...getCart(userId)];
-  const existingItem = userCart.find((item) => item.id === product.id);
+  const resolvedExtras = extraNames
+    .map((extraName) => resolveExtra(product, extraName))
+    .filter((extra): extra is SushiExtra => Boolean(extra))
+    .map((extra) => ({ name: extra.name, price: extra.price }));
+
+  const nextItem: Omit<CartItem, "quantity"> = {
+    id: product.id,
+    name: product.name,
+    basePrice: product.price,
+    extras: resolvedExtras,
+    modifiers,
+  };
+
+  const existingItem = userCart.find((item) => areSameConfiguration(item, nextItem));
 
   if (existingItem) {
     existingItem.quantity += quantity;
-  } else {
-    userCart.push({
-      id: product.id,
-      name: product.name,
-      price: product.price,
-      quantity,
-    });
+    carts[userId] = userCart;
+    return existingItem;
   }
 
+  const createdItem: CartItem = {
+    ...nextItem,
+    quantity,
+  };
+
+  userCart.push(createdItem);
   carts[userId] = userCart;
-  return userCart;
+  return createdItem;
 }
 
 function getCartSummary(userId: string): string {
   const cart = getCart(userId);
   return cart.length > 0 ? formatCart(cart) : "Tu carrito esta vacio";
+}
+
+function buildAddConfirmation(item: CartItem, addedQuantity: number): string {
+  const lines = [`Agregaste ${item.name} 🍣 (x${addedQuantity})`];
+
+  item.extras.forEach((extra) => {
+    lines.push(`Extra: ${extra.name.replace(/^extra\s+/i, "")} (+$${extra.price})`);
+  });
+
+  item.modifiers.forEach((modifier) => {
+    const label = modifier.charAt(0).toUpperCase() + modifier.slice(1);
+    lines.push(label);
+  });
+
+  return lines.join("\n");
 }
 
 async function generateAIResponse(userMessage: string): Promise<string> {
@@ -235,7 +362,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (message?.from && message.text?.body) {
         const to = message.from;
         const userMessage = message.text.body;
-        const normalizedMessage = userMessage.trim().toLowerCase();
+        const normalizedMessage = normalizeText(userMessage);
         console.log("Sending message to:", to);
         console.log("User message:", userMessage);
 
@@ -247,15 +374,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        const selection = parseMenuSelection(normalizedMessage);
+        const selection = parseMenuSelection(userMessage);
 
         if (selection) {
           const itemIndex = selection.itemIndex - 1;
-          const item = sushiMenu[itemIndex];
+          const item = sushiMenu[itemIndex] as SushiMenuItem | undefined;
 
           if (item) {
-            addToCart(to, item, selection.quantity);
-            await sendWhatsAppMessage(to, `Agregaste ${item.name} 🍣 (x${selection.quantity})`);
+            const cartItem = addToCart(to, item, selection.quantity, selection.extras, selection.modifiers);
+            const confirmation = buildAddConfirmation(cartItem, selection.quantity);
+            await sendWhatsAppMessage(to, confirmation);
           } else {
             await sendWhatsAppMessage(to, "Ese numero no existe en el menu");
           }
