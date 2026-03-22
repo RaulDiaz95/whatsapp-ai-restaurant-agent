@@ -8,7 +8,7 @@ type CartItem = {
   id: string;
   name: string;
   price: number;
-  qty: number;
+  quantity: number;
 };
 
 type CartStore = Record<string, CartItem[]>;
@@ -61,9 +61,26 @@ function formatMenu(menu: typeof sushiMenu): string {
 }
 
 function formatCart(cart: CartItem[]): string {
-  const items = cart.map((item, index) => `${index + 1}. ${item.name} x${item.qty} - $${item.price * item.qty}`);
-  const total = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
+  const items = cart.map((item, index) => `${index + 1}. ${item.name} x${item.quantity} - $${item.price * item.quantity}`);
+  const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   return ["🛒 TU CARRITO", "", ...items, "", `Total: $${total}`].join("\n");
+}
+
+function parseMenuSelection(message: string): { itemIndex: number; quantity: number } | null {
+  const match = message.trim().match(/^(\d+)(?:\s*x\s*(\d+))?$/i);
+
+  if (!match) {
+    return null;
+  }
+
+  const itemIndex = Number(match[1]);
+  const quantity = match[2] ? Number(match[2]) : 1;
+
+  if (!Number.isInteger(itemIndex) || itemIndex < 1 || !Number.isInteger(quantity) || quantity < 1) {
+    return null;
+  }
+
+  return { itemIndex, quantity };
 }
 
 function getCartKey(userId: string): string {
@@ -97,20 +114,20 @@ async function withUserCartLock<T>(userId: string, operation: () => T | Promise<
   }
 }
 
-async function addToCart(userId: string, product: SushiMenuItem): Promise<CartItem[]> {
+async function addToCart(userId: string, product: SushiMenuItem, quantity: number): Promise<CartItem[]> {
   return withUserCartLock(userId, async () => {
     const existingCart = await getCart(userId);
     const nextCart = [...existingCart];
     const existingItem = nextCart.find((item) => item.id === product.id);
 
     if (existingItem) {
-      existingItem.qty += 1;
+      existingItem.quantity += quantity;
     } else {
       nextCart.push({
         id: product.id,
         name: product.name,
         price: product.price,
-        qty: 1,
+        quantity,
       });
     }
 
@@ -276,14 +293,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        if (/^\d+$/.test(normalizedMessage)) {
-          const itemIndex = Number(normalizedMessage) - 1;
+        const selection = parseMenuSelection(normalizedMessage);
+
+        if (selection) {
+          const itemIndex = selection.itemIndex - 1;
           const item = sushiMenu[itemIndex];
 
           if (item) {
-            const updatedCart = await addToCart(to, item);
+            const updatedCart = await addToCart(to, item, selection.quantity);
             const addedItem = updatedCart.find((cartItem) => cartItem.id === item.id);
-            const quantityText = addedItem ? ` (x${addedItem.qty})` : "";
+            const quantityText = addedItem ? ` (x${selection.quantity})` : "";
             await sendWhatsAppMessage(to, `Agregaste ${item.name} 🍣${quantityText}`);
           } else {
             await sendWhatsAppMessage(to, "Ese numero no existe en el menu");
