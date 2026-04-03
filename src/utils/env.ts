@@ -15,17 +15,19 @@ function getFirstEnvValue(...keys: string[]): string | undefined {
   return undefined;
 }
 
-const envSchema = z.object({
-  DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
-  WHATSAPP_TOKEN: z.string().min(1, "WHATSAPP_TOKEN is required"),
-  WHATSAPP_PHONE_NUMBER_ID: z.string().min(1, "WHATSAPP_PHONE_NUMBER_ID is required"),
-  WHATSAPP_VERIFY_TOKEN: z.string().min(1, "WHATSAPP_VERIFY_TOKEN is required"),
-  OPENAI_API_KEY: z.string().min(1, "OPENAI_API_KEY is required"),
+const normalizedEnvSchema = z.object({
+  DATABASE_URL: z.string().optional(),
+  WHATSAPP_TOKEN: z.string().optional(),
+  WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
+  WHATSAPP_VERIFY_TOKEN: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
 });
 
-let cachedEnv: z.infer<typeof envSchema> | null = null;
+type Env = z.infer<typeof normalizedEnvSchema>;
 
-export function getEnv(): z.infer<typeof envSchema> {
+let cachedEnv: Env | null = null;
+
+export function getEnv(): Env {
   if (cachedEnv) {
     return cachedEnv;
   }
@@ -38,13 +40,20 @@ export function getEnv(): z.infer<typeof envSchema> {
     OPENAI_API_KEY: getFirstEnvValue("OPENAI_API_KEY", "openai_api_key"),
   };
 
-  const parsedEnv = envSchema.safeParse(normalizedEnv);
+  cachedEnv = normalizedEnvSchema.parse(normalizedEnv);
+  return cachedEnv;
+}
 
-  if (!parsedEnv.success) {
-    const issues = parsedEnv.error.issues.map((issue) => issue.message).join(", ");
-    throw new Error(`Invalid environment configuration: ${issues}`);
+export function requireEnv<const K extends keyof Env>(...keys: K[]): Env & { [P in K]-?: NonNullable<Env[P]> } {
+  const env = getEnv();
+  const missingKeys = keys.filter((key) => {
+    const value = env[key];
+    return typeof value !== "string" || value.trim().length === 0;
+  });
+
+  if (missingKeys.length > 0) {
+    throw new Error(`Invalid environment configuration: ${missingKeys.join(", ")} is required`);
   }
 
-  cachedEnv = parsedEnv.data;
-  return cachedEnv;
+  return env as Env & { [P in K]-?: NonNullable<Env[P]> };
 }

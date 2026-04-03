@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { sushiMenu } from "../lib/sushiMenu";
-import { getEnv } from "../src/utils/env";
+import { getEnv, requireEnv } from "../src/utils/env";
 
 type SushiExtra = {
   name: string;
@@ -82,7 +82,7 @@ function getQueryParam(value: string | string[] | undefined): string {
 }
 
 function getVerifyToken(): string {
-  return getEnv().WHATSAPP_VERIFY_TOKEN;
+  return requireEnv("WHATSAPP_VERIFY_TOKEN").WHATSAPP_VERIFY_TOKEN;
 }
 
 type WhatsAppWebhookBody = {
@@ -506,12 +506,7 @@ function resolveMenuItemFromAI(itemId: number | string): SushiMenuItem | null {
 }
 
 async function requestAIAction(userMessage: string, systemPrompt: string): Promise<AIAction | null> {
-  const { OPENAI_API_KEY: apiKey } = getEnv();
-
-  if (!apiKey) {
-    console.error("Missing OPENAI_API_KEY");
-    return null;
-  }
+  const { OPENAI_API_KEY: apiKey } = requireEnv("OPENAI_API_KEY");
 
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -588,12 +583,10 @@ Return ONLY valid JSON now.`;
 }
 
 async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
-  const { WHATSAPP_TOKEN: token, WHATSAPP_PHONE_NUMBER_ID: phoneNumberId } = getEnv();
-
-  if (!token || !phoneNumberId) {
-    console.error("Missing WHATSAPP_TOKEN or WHATSAPP_PHONE_NUMBER_ID");
-    return;
-  }
+  const { WHATSAPP_TOKEN: token, WHATSAPP_PHONE_NUMBER_ID: phoneNumberId } = requireEnv(
+    "WHATSAPP_TOKEN",
+    "WHATSAPP_PHONE_NUMBER_ID"
+  );
 
   const response = await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
     method: "POST",
