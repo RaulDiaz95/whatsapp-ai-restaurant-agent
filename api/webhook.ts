@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { sushiMenu } from "../lib/sushiMenu";
+import { getEnv } from "../src/utils/env";
 
 type SushiExtra = {
   name: string;
@@ -27,6 +28,34 @@ type ParsedSelection = {
   modifiers: string[];
 };
 
+type AIActionItem = {
+  id?: number | string;
+  quantity?: number;
+};
+
+type AIAction =
+  | {
+      action: "show_menu";
+    }
+  | {
+      action: "add_to_cart";
+      items: AIActionItem[];
+    }
+  | {
+      action: "view_cart";
+    }
+  | {
+      action: "remove_items";
+      items: AIActionItem[];
+    }
+  | {
+      action: "recommend";
+    }
+  | {
+      action: "chat";
+      message: string;
+    };
+
 type CartEditCommand =
   | {
       type: "remove";
@@ -42,6 +71,7 @@ type CartEditCommand =
     };
 
 const carts: Record<string, CartItem[]> = {};
+const FALLBACK_CHAT_MESSAGE = "Hola, puedo ayudarte con el menu, recomendaciones de sushi o tu pedido. Que te gustaria pedir?";
 
 function getQueryParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -52,7 +82,7 @@ function getQueryParam(value: string | string[] | undefined): string {
 }
 
 function getVerifyToken(): string {
-  return process.env.VERIFY_TOKEN || "";
+  return getEnv().WHATSAPP_VERIFY_TOKEN;
 }
 
 type WhatsAppWebhookBody = {
@@ -81,7 +111,19 @@ function normalizeText(value: string): string {
 
 function formatMenu(menu: typeof sushiMenu): string {
   const items = menu.map((item, index) => `${index + 1}. ${item.name} - $${item.price}`);
-  return ["🍣 MENÚ SUSHI", "", ...items].join("\n");
+  return ["MENU SUSHI", "", ...items].join("\n");
+}
+
+function formatRecommendations(menu: typeof sushiMenu): string {
+  const suggestions = [menu[4], menu[0], menu[2]].filter((item): item is (typeof sushiMenu)[number] => Boolean(item));
+  const lines = ["Te recomiendo estos rolls:", ""];
+
+  suggestions.slice(0, 3).forEach((item, index) => {
+    lines.push(`${index + 1}. ${item.name} - $${item.price}`);
+  });
+
+  lines.push("", "Si quieres, te los agrego.");
+  return lines.join("\n");
 }
 
 function getUnitPrice(item: CartItem): number {
@@ -90,7 +132,7 @@ function getUnitPrice(item: CartItem): number {
 }
 
 function formatCart(cart: CartItem[]): string {
-  const lines: string[] = ["🛒 TU CARRITO", ""];
+  const lines: string[] = ["TU CARRITO", ""];
   let total = 0;
 
   cart.forEach((item, index) => {
@@ -260,20 +302,43 @@ function removeCartItem(userId: string, itemIndex: number): CartItem | null {
   return removedItem ?? null;
 }
 
+function removeCartItemsByProductId(userId: string, productId: string, quantity: number): CartItem[] {
+  const removedItems: CartItem[] = [];
+
+  for (let attempt = 0; attempt < quantity; attempt += 1) {
+    const userCart = [...getCart(userId)];
+    const index = userCart.findIndex((item) => item.id === productId);
+
+    if (index < 0) {
+      break;
+    }
+
+    const [removedItem] = userCart.splice(index, 1);
+    carts[userId] = userCart;
+
+    if (removedItem) {
+      removedItems.push(removedItem);
+    }
+  }
+
+  return removedItems;
+}
+
 function updateCartItemQuantity(userId: string, itemIndex: number, quantity: number): CartItem | null {
   const userCart = [...getCart(userId)];
   const index = itemIndex - 1;
+  const currentItem = userCart[index];
 
-  if (index < 0 || index >= userCart.length) {
+  if (index < 0 || index >= userCart.length || !currentItem) {
     return null;
   }
 
   userCart[index] = {
-    ...userCart[index],
+    ...currentItem,
     quantity,
   };
   carts[userId] = userCart;
-  return userCart[index];
+  return userCart[index] ?? null;
 }
 
 function clearCart(userId: string): void {
@@ -286,7 +351,7 @@ function getCartSummary(userId: string): string {
 }
 
 function buildAddConfirmation(item: CartItem, addedQuantity: number): string {
-  const lines = [`Agregaste ${item.name} 🍣 (x${addedQuantity})`];
+  const lines = [`Agregaste ${item.name} (x${addedQuantity})`];
 
   item.extras.forEach((extra) => {
     lines.push(`Extra: ${extra.name.replace(/^extra\s+/i, "")} (+$${extra.price})`);
@@ -300,33 +365,153 @@ function buildAddConfirmation(item: CartItem, addedQuantity: number): string {
   return lines.join("\n");
 }
 
-async function generateAIResponse(userMessage: string): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY || "";
+function buildMenuPrompt(menu: typeof sushiMenu): string {
+  const actionMenu = menu.map((item, index) => ({
+    id: index + 1,
+    name: item.name,
+    price: item.price,
+  }));
+
+  return `You are a sushi restaurant assistant.
+You MUST return ONLY valid JSON.
+Do NOT return plain text.
+Keep responses short and natural in Spanish.
+
+Menu:
+${JSON.stringify(menu)}
+
+Each item has:
+- id
+- name
+- price
+
+Action menu reference:
+${JSON.stringify(actionMenu)}
+
+Understand natural language like:
+- "quiero 2 rolls"
+- "agrega un california"
+- "muestrame el menu"
+- "que recomiendas"
+
+Convert user input into structured actions.
+
+Valid JSON shapes:
+{"action":"show_menu"}
+{"action":"add_to_cart","items":[{"id":1,"quantity":2},{"id":3,"quantity":1}]}
+{"action":"view_cart"}
+{"action":"remove_items","items":[{"id":1,"quantity":1}]}
+{"action":"recommend"}
+{"action":"chat","message":"Claro, puedo ayudarte con eso"}
+
+Rules:
+- For add_to_cart and remove_items, always include items.
+- Use the numeric menu id from the action menu reference.
+- If the user asks to see the cart, use view_cart.
+- If the user asks for recommendations, use recommend.
+- If the request is conversational or unclear, use chat.
+- Return ONLY valid JSON.`;
+}
+
+function parseAIAction(content: string): AIAction | null {
+  try {
+    const parsed = JSON.parse(content) as Partial<AIAction> & {
+      items?: unknown;
+      message?: unknown;
+    };
+
+    if (!parsed || typeof parsed !== "object" || typeof parsed.action !== "string") {
+      return null;
+    }
+
+    if (parsed.action === "show_menu") {
+      return { action: "show_menu" };
+    }
+
+    if (parsed.action === "view_cart") {
+      return { action: "view_cart" };
+    }
+
+    if (parsed.action === "recommend") {
+      return { action: "recommend" };
+    }
+
+    if (parsed.action === "chat") {
+      if (typeof parsed.message !== "string" || parsed.message.trim().length === 0) {
+        return null;
+      }
+
+      return {
+        action: "chat",
+        message: parsed.message.trim(),
+      };
+    }
+
+    if (parsed.action === "add_to_cart" || parsed.action === "remove_items") {
+      if (!Array.isArray(parsed.items) || parsed.items.length === 0) {
+        return null;
+      }
+
+      const items = parsed.items
+        .map((item) => {
+          if (!item || typeof item !== "object") {
+            return null;
+          }
+
+          const candidate = item as AIActionItem;
+          const quantity =
+            typeof candidate.quantity === "number" && Number.isInteger(candidate.quantity) && candidate.quantity > 0
+              ? candidate.quantity
+              : 1;
+
+          if (typeof candidate.id !== "number" && typeof candidate.id !== "string") {
+            return null;
+          }
+
+          return {
+            id: candidate.id,
+            quantity,
+          };
+        })
+        .filter((item): item is Required<AIActionItem> => Boolean(item));
+
+      if (items.length === 0) {
+        return null;
+      }
+
+      return {
+        action: parsed.action,
+        items,
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveMenuItemFromAI(itemId: number | string): SushiMenuItem | null {
+  if (typeof itemId === "number") {
+    return (sushiMenu[itemId - 1] as SushiMenuItem | undefined) ?? null;
+  }
+
+  const normalizedId = normalizeText(itemId);
+
+  return (
+    (sushiMenu.find((item) => {
+      return normalizeText(item.id) === normalizedId || normalizeText(item.name) === normalizedId;
+    }) as SushiMenuItem | undefined) ?? null
+  );
+}
+
+async function requestAIAction(userMessage: string, systemPrompt: string): Promise<AIAction | null> {
+  const { OPENAI_API_KEY: apiKey } = getEnv();
 
   if (!apiKey) {
     console.error("Missing OPENAI_API_KEY");
-    return "Hola, puedo ayudarte con el menu, recomendaciones de sushi o tu pedido. Que se te antoja?";
+    return null;
   }
-
-  const systemPrompt = `You are a friendly assistant for a sushi restaurant.
-You speak Spanish.
-Be short, natural and friendly.
-
-You can help with:
-- showing the menu
-- recommending sushi
-- answering questions about ingredients
-- taking simple orders
-
-Menu:
-- California Roll
-- Philadelphia Roll
-- Spicy Tuna Roll
-- Tempura Roll
-- Sushi Mixto
-- Bebidas: té, refrescos
-
-Always guide the user to order or ask for more information.`;
 
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -337,6 +522,9 @@ Always guide the user to order or ask for more information.`;
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
+        response_format: {
+          type: "json_object",
+        },
         messages: [
           {
             role: "system",
@@ -356,7 +544,7 @@ Always guide the user to order or ask for more information.`;
         status: response.status,
         body: errorText,
       });
-      return "Hola, puedo ayudarte con el menu, recomendaciones de sushi o tu pedido. Que te gustaria pedir?";
+      return null;
     }
 
     const data = (await response.json()) as {
@@ -367,22 +555,43 @@ Always guide the user to order or ask for more information.`;
       }>;
     };
 
-    return (
-      data.choices?.[0]?.message?.content?.trim() ||
-      "Hola, puedo ayudarte con el menu, recomendaciones de sushi o tu pedido. Que te gustaria pedir?"
-    );
+    const content = data.choices?.[0]?.message?.content?.trim();
+    return content ? parseAIAction(content) : null;
   } catch (error) {
     console.error("OpenAI request error:", error);
-    return "Hola, puedo ayudarte con el menu, recomendaciones de sushi o tu pedido. Que te gustaria pedir?";
+    return null;
   }
 }
 
+async function generateAIResponse(userMessage: string): Promise<AIAction> {
+  const systemPrompt = buildMenuPrompt(sushiMenu);
+  const firstAttempt = await requestAIAction(userMessage, systemPrompt);
+
+  if (firstAttempt) {
+    return firstAttempt;
+  }
+
+  const retryPrompt = `${systemPrompt}
+
+Previous response was invalid because it was not parseable JSON.
+Return ONLY valid JSON now.`;
+  const secondAttempt = await requestAIAction(userMessage, retryPrompt);
+
+  if (secondAttempt) {
+    return secondAttempt;
+  }
+
+  return {
+    action: "chat",
+    message: FALLBACK_CHAT_MESSAGE,
+  };
+}
+
 async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
-  const token = process.env.WHATSAPP_TOKEN || "";
-  const phoneNumberId = process.env.PHONE_NUMBER_ID || "";
+  const { WHATSAPP_TOKEN: token, WHATSAPP_PHONE_NUMBER_ID: phoneNumberId } = getEnv();
 
   if (!token || !phoneNumberId) {
-    console.error("Missing WHATSAPP_TOKEN or PHONE_NUMBER_ID");
+    console.error("Missing WHATSAPP_TOKEN or WHATSAPP_PHONE_NUMBER_ID");
     return;
   }
 
@@ -445,9 +654,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         console.log("User message:", userMessage);
 
         if (normalizedMessage === "menu") {
-          console.log("User requested menu");
-          const menuText = formatMenu(sushiMenu);
-          await sendWhatsAppMessage(to, menuText);
+          await sendWhatsAppMessage(to, formatMenu(sushiMenu));
           res.status(200).json({ status: "ok" });
           return;
         }
@@ -457,7 +664,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         if (editCommand) {
           if (editCommand.type === "clear") {
             clearCart(to);
-            await sendWhatsAppMessage(to, "Tu carrito ha sido vaciado 🧹");
+            await sendWhatsAppMessage(to, "Tu carrito ha sido vaciado.");
             res.status(200).json({ status: "ok" });
             return;
           }
@@ -495,8 +702,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
           if (item) {
             const cartItem = addToCart(to, item, selection.quantity, selection.extras, selection.modifiers);
-            const confirmation = buildAddConfirmation(cartItem, selection.quantity);
-            await sendWhatsAppMessage(to, confirmation);
+            await sendWhatsAppMessage(to, buildAddConfirmation(cartItem, selection.quantity));
           } else {
             await sendWhatsAppMessage(to, "Ese numero no existe en el menu");
           }
@@ -506,8 +712,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }
 
         if (normalizedMessage === "carrito") {
-          const cartText = getCartSummary(to);
-          await sendWhatsAppMessage(to, cartText);
+          await sendWhatsAppMessage(to, getCartSummary(to));
           res.status(200).json({ status: "ok" });
           return;
         }
@@ -519,9 +724,85 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           return;
         }
 
-        const reply = await generateAIResponse(userMessage);
-        console.log("AI reply:", reply);
-        await sendWhatsAppMessage(to, reply);
+        const aiAction = await generateAIResponse(userMessage);
+        console.log("AI action:", JSON.stringify(aiAction));
+
+        if (aiAction.action === "show_menu") {
+          await sendWhatsAppMessage(to, formatMenu(sushiMenu));
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
+        if (aiAction.action === "add_to_cart") {
+          const confirmations = aiAction.items
+            .map((requestedItem) => {
+              if (typeof requestedItem.id !== "number" && typeof requestedItem.id !== "string") {
+                return null;
+              }
+
+              const item = resolveMenuItemFromAI(requestedItem.id);
+
+              if (!item) {
+                return null;
+              }
+
+              const quantity = requestedItem.quantity ?? 1;
+              const cartItem = addToCart(to, item, quantity, [], []);
+              return buildAddConfirmation(cartItem, quantity);
+            })
+            .filter((messageText): messageText is string => Boolean(messageText));
+
+          await sendWhatsAppMessage(
+            to,
+            confirmations.length > 0 ? confirmations.join("\n\n") : "No encontre esos productos en el menu."
+          );
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
+        if (aiAction.action === "view_cart") {
+          await sendWhatsAppMessage(to, getCartSummary(to));
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
+        if (aiAction.action === "remove_items") {
+          const removals = aiAction.items
+            .map((requestedItem) => {
+              if (typeof requestedItem.id !== "number" && typeof requestedItem.id !== "string") {
+                return null;
+              }
+
+              const item = resolveMenuItemFromAI(requestedItem.id);
+
+              if (!item) {
+                return null;
+              }
+
+              const removedItems = removeCartItemsByProductId(to, item.id, requestedItem.quantity ?? 1);
+              if (removedItems.length === 0) {
+                return null;
+              }
+
+              return `Eliminaste ${item.name} del carrito`;
+            })
+            .filter((messageText): messageText is string => Boolean(messageText));
+
+          await sendWhatsAppMessage(
+            to,
+            removals.length > 0 ? removals.join("\n") : "No pude identificar que producto quitar del carrito."
+          );
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
+        if (aiAction.action === "recommend") {
+          await sendWhatsAppMessage(to, formatRecommendations(sushiMenu));
+          res.status(200).json({ status: "ok" });
+          return;
+        }
+
+        await sendWhatsAppMessage(to, aiAction.message || FALLBACK_CHAT_MESSAGE);
       }
 
       res.status(200).json({ status: "ok" });

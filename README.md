@@ -40,6 +40,9 @@ WHATSAPP_VERIFY_TOKEN=
 OPENAI_API_KEY=
 ```
 
+The runtime also accepts legacy aliases if they already exist in your deployment:
+`PHONE_NUMBER_ID`, `VERIFY_TOKEN`, and `openai_api_key`.
+
 ## Local Development
 
 1. Install dependencies:
