@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { sushiMenu } from "../lib/sushiMenu";
-import { getEnv, requireEnv } from "../src/utils/env";
+import { requireEnv } from "../src/utils/env";
 
 type SushiExtra = {
   name: string;
@@ -28,32 +28,31 @@ type ParsedSelection = {
   modifiers: string[];
 };
 
-type AIActionItem = {
+type IntentItem = {
   id?: number | string;
   quantity?: number;
 };
 
-type AIAction =
+type IntentResult =
   | {
       action: "show_menu";
     }
   | {
       action: "add_to_cart";
-      items: AIActionItem[];
+      items: IntentItem[];
     }
   | {
       action: "view_cart";
     }
   | {
-      action: "remove_items";
-      items: AIActionItem[];
+      action: "remove_item";
+      items: IntentItem[];
     }
   | {
       action: "recommend";
     }
   | {
-      action: "chat";
-      message: string;
+      action: "none";
     };
 
 type CartEditCommand =
@@ -70,20 +69,10 @@ type CartEditCommand =
       type: "clear";
     };
 
-const carts: Record<string, CartItem[]> = {};
-const FALLBACK_CHAT_MESSAGE = "Hola, puedo ayudarte con el menu, recomendaciones de sushi o tu pedido. Que te gustaria pedir?";
-
-function getQueryParam(value: string | string[] | undefined): string {
-  if (Array.isArray(value)) {
-    return value[0] ?? "";
-  }
-
-  return value ?? "";
-}
-
-function getVerifyToken(): string {
-  return requireEnv("WHATSAPP_VERIFY_TOKEN").WHATSAPP_VERIFY_TOKEN;
-}
+type ConversationMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
 
 type WhatsAppWebhookBody = {
   entry?: Array<{
@@ -100,6 +89,32 @@ type WhatsAppWebhookBody = {
   }>;
 };
 
+type OpenAIChatResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+};
+
+const OPENAI_MODEL = "gpt-4o-mini";
+const MAX_HISTORY_MESSAGES = 10;
+const carts: Record<string, CartItem[]> = {};
+const conversationHistory: Record<string, ConversationMessage[]> = {};
+const NATURAL_FALLBACK_MESSAGE = "Se me fue esa parte, pero si quieres te ayudo con tu pedido. Te muestro el menu o te recomiendo algo.";
+
+function getQueryParam(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return value[0] ?? "";
+  }
+
+  return value ?? "";
+}
+
+function getVerifyToken(): string {
+  return requireEnv("WHATSAPP_VERIFY_TOKEN").WHATSAPP_VERIFY_TOKEN;
+}
+
 function normalizeText(value: string): string {
   return value
     .toLowerCase()
@@ -107,6 +122,20 @@ function normalizeText(value: string): string {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function getConversationHistory(userId: string): ConversationMessage[] {
+  return conversationHistory[userId] || [];
+}
+
+function saveConversationTurn(userId: string, userMessage: string, assistantMessage: string): void {
+  const currentHistory = getConversationHistory(userId);
+  const newEntries: ConversationMessage[] = [
+    { role: "user", content: userMessage },
+    { role: "assistant", content: assistantMessage },
+  ];
+  const updatedHistory = [...currentHistory, ...newEntries];
+  conversationHistory[userId] = updatedHistory.slice(-MAX_HISTORY_MESSAGES);
 }
 
 function formatMenu(menu: typeof sushiMenu): string {
@@ -351,7 +380,7 @@ function getCartSummary(userId: string): string {
 }
 
 function buildAddConfirmation(item: CartItem, addedQuantity: number): string {
-  const lines = [`Agregaste ${item.name} (x${addedQuantity})`];
+  const lines = [`Te agregue ${addedQuantity} x ${item.name}`];
 
   item.extras.forEach((extra) => {
     lines.push(`Extra: ${extra.name.replace(/^extra\s+/i, "")} (+$${extra.price})`);
@@ -365,91 +394,95 @@ function buildAddConfirmation(item: CartItem, addedQuantity: number): string {
   return lines.join("\n");
 }
 
-function buildMenuPrompt(menu: typeof sushiMenu): string {
-  const actionMenu = menu.map((item, index) => ({
-    id: index + 1,
-    name: item.name,
-    price: item.price,
-  }));
+function buildIntentPrompt(): string {
+  return `You are an intent parser for a sushi ordering system.
 
-  return `You are a friendly sushi restaurant assistant speaking on WhatsApp.
-You represent a sushi restaurant and should feel like a real person taking an order.
-You MUST return ONLY valid JSON.
-Do NOT return plain text outside JSON.
-Always write short, natural, human Spanish.
-Do not sound robotic, stiff, or repetitive.
-Never keep repeating phrases like "Claro, puedo ayudarte con eso".
-Vary wording naturally across replies.
+Return ONLY valid JSON.
 
-You can:
-- show the menu
-- help build an order
-- recommend items
-- answer questions about food
-- handle off-topic messages gracefully and redirect back to ordering
-
-If the user goes off topic:
-- respond naturally
-- do not say you cannot help in a robotic way
-- gently redirect to the menu, cart, recommendations, or ordering
-
-Examples of tone:
-- User: "que venden aqui?"
-  Reply idea: "Tenemos sushi, rolls especiales y bebidas. Si quieres, te muestro el menu completo."
-- User: "tienen bebidas?"
-  Reply idea: "Si, tenemos te y refrescos. Si quieres, te sugiero algo para tomar."
-- User: "cuanto cuesta bitcoin?"
-  Reply idea: "No manejo eso, pero si quieres te ayudo con tu pedido de sushi. Te muestro el menu o te recomiendo algo."
-
-Menu:
-${JSON.stringify(menu)}
-
-Each item has:
-- id
-- name
-- price
-
-Action menu reference:
-${JSON.stringify(actionMenu)}
-
-Understand natural language like:
-- "quiero un spicy tuna y 2 california"
-- "agrega un california"
-- "muestrame el menu"
-- "que recomiendas"
-- "que venden aqui?"
-
-Convert user input into structured actions.
-Always include a natural message field.
-
-Allowed actions:
+Actions allowed:
 - show_menu
 - add_to_cart
 - view_cart
+- remove_item
 - recommend
-- chat
+- none
 
-Valid JSON shapes:
-{"action":"show_menu","message":"Te paso el menu para que lo veas."}
-{"action":"add_to_cart","message":"Listo, te lo agrego.","items":[{"id":1,"quantity":2},{"id":3,"quantity":1}]}
-{"action":"view_cart","message":"Te muestro tu carrito."}
-{"action":"recommend","message":"Te recomiendo algo rico."}
-{"action":"chat","message":"Si, tenemos te y refrescos. Si quieres, tambien te muestro el menu."}
+Menu:
+${JSON.stringify(sushiMenu)}
 
-Rules:
-- For add_to_cart, always include items.
-- Use the numeric menu id from the action menu reference.
-- The message field must always feel natural and human.
-- Keep responses short and friendly.
-- Always guide the conversation back to ordering, viewing the menu, adding items, or checkout.
-- Return ONLY valid JSON.`;
+Examples:
+
+User: "quiero 2 california"
+-> {"action":"add_to_cart","items":[{"id":1,"quantity":2}]}
+
+User: "ver menu"
+-> {"action":"show_menu"}
+
+User: "ver carrito"
+-> {"action":"view_cart"}
+
+User: "quita un california"
+-> {"action":"remove_item","items":[{"id":1,"quantity":1}]}
+
+User: "hola"
+-> {"action":"none"}
+
+IMPORTANT:
+- NEVER return text
+- ONLY JSON
+- Use the numeric menu position as item id
+- If the user is just chatting, greeting, asking something broad, or off topic, return {"action":"none"}
+- For add_to_cart and remove_item, include items
+- Quantity must be a positive integer`;
 }
 
-function parseAIAction(content: string): AIAction | null {
+function buildConversationalPrompt(): string {
+  return `You are a real human assistant working in a sushi restaurant via WhatsApp.
+
+Your personality:
+- friendly
+- natural
+- warm
+- casual (not too formal)
+- NOT robotic
+
+Rules:
+- NEVER repeat phrases like "Claro puedo ayudarte con eso"
+- ALWAYS vary responses
+- keep messages short
+- guide the user toward ordering
+
+If user goes off-topic:
+-> respond naturally and redirect
+
+Examples:
+
+User: "que venden?"
+-> "Tenemos sushi 🍣, rolls especiales y bebidas. Si quieres, te muestro el menu 😊"
+
+User: "cuanto cuesta bitcoin?"
+-> "😅 no se mucho de eso, pero si puedo ayudarte con tu pedido de sushi 🍣"
+
+Tone:
+- human
+- natural
+- slightly informal
+- use emojis occasionally (not too many)
+
+You are allowed to:
+- answer food questions
+- talk naturally
+- redirect back to ordering
+- suggest menu, cart, or recommendations
+
+Return ONLY plain text in Spanish.`;
+}
+
+function parseIntentResult(content: string): IntentResult | null {
   try {
-    const parsed = JSON.parse(content) as Partial<AIAction> & {
+    const parsed = JSON.parse(content) as {
+      action?: string;
       items?: unknown;
-      message?: unknown;
     };
 
     if (!parsed || typeof parsed !== "object" || typeof parsed.action !== "string") {
@@ -468,18 +501,11 @@ function parseAIAction(content: string): AIAction | null {
       return { action: "recommend" };
     }
 
-    if (parsed.action === "chat") {
-      if (typeof parsed.message !== "string" || parsed.message.trim().length === 0) {
-        return null;
-      }
-
-      return {
-        action: "chat",
-        message: parsed.message.trim(),
-      };
+    if (parsed.action === "none") {
+      return { action: "none" };
     }
 
-    if (parsed.action === "add_to_cart" || parsed.action === "remove_items") {
+    if (parsed.action === "add_to_cart" || parsed.action === "remove_item") {
       if (!Array.isArray(parsed.items) || parsed.items.length === 0) {
         return null;
       }
@@ -490,7 +516,7 @@ function parseAIAction(content: string): AIAction | null {
             return null;
           }
 
-          const candidate = item as AIActionItem;
+          const candidate = item as IntentItem;
           const quantity =
             typeof candidate.quantity === "number" && Number.isInteger(candidate.quantity) && candidate.quantity > 0
               ? candidate.quantity
@@ -505,7 +531,7 @@ function parseAIAction(content: string): AIAction | null {
             quantity,
           };
         })
-        .filter((item): item is Required<AIActionItem> => Boolean(item));
+        .filter((item): item is Required<IntentItem> => Boolean(item));
 
       if (items.length === 0) {
         return null;
@@ -523,7 +549,7 @@ function parseAIAction(content: string): AIAction | null {
   }
 }
 
-function resolveMenuItemFromAI(itemId: number | string): SushiMenuItem | null {
+function resolveMenuItemFromIntent(itemId: number | string): SushiMenuItem | null {
   if (typeof itemId === "number") {
     return (sushiMenu[itemId - 1] as SushiMenuItem | undefined) ?? null;
   }
@@ -531,13 +557,13 @@ function resolveMenuItemFromAI(itemId: number | string): SushiMenuItem | null {
   const normalizedId = normalizeText(itemId);
 
   return (
-    (sushiMenu.find((item) => {
-      return normalizeText(item.id) === normalizedId || normalizeText(item.name) === normalizedId;
-    }) as SushiMenuItem | undefined) ?? null
+    (sushiMenu.find((item) => normalizeText(item.id) === normalizedId || normalizeText(item.name) === normalizedId) as
+      | SushiMenuItem
+      | undefined) ?? null
   );
 }
 
-async function requestAIAction(userMessage: string, systemPrompt: string): Promise<AIAction | null> {
+async function createOpenAICompletion(messages: Array<{ role: "system" | "user" | "assistant"; content: string }>, jsonMode = false): Promise<string | null> {
   const { OPENAI_API_KEY: apiKey } = requireEnv("OPENAI_API_KEY");
 
   try {
@@ -548,70 +574,193 @@ async function requestAIAction(userMessage: string, systemPrompt: string): Promi
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
-        response_format: {
-          type: "json_object",
-        },
-        messages: [
-          {
-            role: "system",
-            content: systemPrompt,
-          },
-          {
-            role: "user",
-            content: userMessage,
-          },
-        ],
+        model: OPENAI_MODEL,
+        ...(jsonMode
+          ? {
+              response_format: {
+                type: "json_object",
+              },
+            }
+          : {}),
+        messages,
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
-      console.error("Failed to generate AI response", {
+      console.error("OpenAI request failed", {
         status: response.status,
         body: errorText,
       });
       return null;
     }
 
-    const data = (await response.json()) as {
-      choices?: Array<{
-        message?: {
-          content?: string;
-        };
-      }>;
-    };
-
-    const content = data.choices?.[0]?.message?.content?.trim();
-    return content ? parseAIAction(content) : null;
+    const data = (await response.json()) as OpenAIChatResponse;
+    return data.choices?.[0]?.message?.content?.trim() || null;
   } catch (error) {
     console.error("OpenAI request error:", error);
     return null;
   }
 }
 
-async function generateAIResponse(userMessage: string): Promise<AIAction> {
-  const systemPrompt = buildMenuPrompt(sushiMenu);
-  const firstAttempt = await requestAIAction(userMessage, systemPrompt);
+async function interpretUserIntent(userMessage: string): Promise<IntentResult> {
+  const systemPrompt = buildIntentPrompt();
+  const firstAttempt = await createOpenAICompletion(
+    [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ],
+    true
+  );
 
-  if (firstAttempt) {
-    return firstAttempt;
+  const parsedFirstAttempt = firstAttempt ? parseIntentResult(firstAttempt) : null;
+  if (parsedFirstAttempt) {
+    return parsedFirstAttempt;
   }
 
-  const retryPrompt = `${systemPrompt}
+  const retryAttempt = await createOpenAICompletion(
+    [
+      { role: "system", content: `${systemPrompt}\n\nPrevious output was invalid. Return only valid JSON.` },
+      { role: "user", content: userMessage },
+    ],
+    true
+  );
 
-Previous response was invalid because it was not parseable JSON.
-Return ONLY valid JSON now.`;
-  const secondAttempt = await requestAIAction(userMessage, retryPrompt);
+  const parsedRetry = retryAttempt ? parseIntentResult(retryAttempt) : null;
+  return parsedRetry ?? { action: "none" };
+}
 
-  if (secondAttempt) {
-    return secondAttempt;
+async function generateConversationalResponse(userMessage: string, history: ConversationMessage[]): Promise<string> {
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+    { role: "system", content: buildConversationalPrompt() },
+    ...history.slice(-MAX_HISTORY_MESSAGES).map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+    { role: "user", content: userMessage },
+  ];
+
+  const response = await createOpenAICompletion(messages);
+  return response || NATURAL_FALLBACK_MESSAGE;
+}
+
+function combineReply(primary: string | null, conversational: string): string {
+  const cleanedPrimary = primary?.trim();
+  const cleanedConversational = conversational.trim();
+
+  if (!cleanedPrimary) {
+    return cleanedConversational;
   }
 
-  return {
-    action: "chat",
-    message: FALLBACK_CHAT_MESSAGE,
-  };
+  if (normalizeText(cleanedPrimary) === normalizeText(cleanedConversational)) {
+    return cleanedPrimary;
+  }
+
+  return `${cleanedPrimary}\n\n${cleanedConversational}`;
+}
+
+function handleManualCartLogic(userId: string, userMessage: string): string | null {
+  const normalizedMessage = normalizeText(userMessage);
+
+  const editCommand = parseCartEditCommand(userMessage);
+  if (editCommand) {
+    if (editCommand.type === "clear") {
+      clearCart(userId);
+      return "Tu carrito ha sido vaciado.";
+    }
+
+    if (editCommand.type === "remove") {
+      const removedItem = removeCartItem(userId, editCommand.itemIndex);
+      return removedItem ? `Elimine ${removedItem.name} del carrito.` : "Ese producto no existe en tu carrito.";
+    }
+
+    const updatedItem = updateCartItemQuantity(userId, editCommand.itemIndex, editCommand.quantity);
+    return updatedItem ? `Actualice ${updatedItem.name} a x${editCommand.quantity}.` : "Ese producto no existe en tu carrito.";
+  }
+
+  const selection = parseMenuSelection(userMessage);
+  if (selection) {
+    const item = sushiMenu[selection.itemIndex - 1] as SushiMenuItem | undefined;
+
+    if (!item) {
+      return "Ese numero no existe en el menu.";
+    }
+
+    const cartItem = addToCart(userId, item, selection.quantity, selection.extras, selection.modifiers);
+    return buildAddConfirmation(cartItem, selection.quantity);
+  }
+
+  if (normalizedMessage === "menu") {
+    return formatMenu(sushiMenu);
+  }
+
+  if (normalizedMessage === "carrito") {
+    return getCartSummary(userId);
+  }
+
+  if (normalizedMessage === "cancelar") {
+    clearCart(userId);
+    return "Tu carrito ha sido cancelado.";
+  }
+
+  return null;
+}
+
+function executeIntent(userId: string, intent: IntentResult): string | null {
+  if (intent.action === "show_menu") {
+    return formatMenu(sushiMenu);
+  }
+
+  if (intent.action === "view_cart") {
+    return getCartSummary(userId);
+  }
+
+  if (intent.action === "recommend") {
+    return formatRecommendations(sushiMenu);
+  }
+
+  if (intent.action === "add_to_cart") {
+    const confirmations = intent.items
+      .map((requestedItem) => {
+        if (typeof requestedItem.id !== "number" && typeof requestedItem.id !== "string") {
+          return null;
+        }
+
+        const item = resolveMenuItemFromIntent(requestedItem.id);
+        if (!item) {
+          return null;
+        }
+
+        const quantity = requestedItem.quantity ?? 1;
+        const cartItem = addToCart(userId, item, quantity, [], []);
+        return buildAddConfirmation(cartItem, quantity);
+      })
+      .filter((message): message is string => Boolean(message));
+
+    return confirmations.length > 0 ? confirmations.join("\n\n") : "No encontre esos productos en el menu.";
+  }
+
+  if (intent.action === "remove_item") {
+    const removals = intent.items
+      .map((requestedItem) => {
+        if (typeof requestedItem.id !== "number" && typeof requestedItem.id !== "string") {
+          return null;
+        }
+
+        const item = resolveMenuItemFromIntent(requestedItem.id);
+        if (!item) {
+          return null;
+        }
+
+        const removedItems = removeCartItemsByProductId(userId, item.id, requestedItem.quantity ?? 1);
+        return removedItems.length > 0 ? `Quite ${removedItems.length} x ${item.name} del carrito.` : null;
+      })
+      .filter((message): message is string => Boolean(message));
+
+    return removals.length > 0 ? removals.join("\n") : "No pude identificar que producto quitar del carrito.";
+  }
+
+  return null;
 }
 
 async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
@@ -674,160 +823,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (message?.from && message.text?.body) {
         const to = message.from;
         const userMessage = message.text.body;
-        const normalizedMessage = normalizeText(userMessage);
+        const history = getConversationHistory(to);
+
         console.log("Sending message to:", to);
         console.log("User message:", userMessage);
 
-        if (normalizedMessage === "menu") {
-          await sendWhatsAppMessage(to, formatMenu(sushiMenu));
-          res.status(200).json({ status: "ok" });
-          return;
-        }
+        const intent = await interpretUserIntent(userMessage);
+        console.log("Parsed intent:", JSON.stringify(intent));
 
-        const editCommand = parseCartEditCommand(userMessage);
+        const actionResult = executeIntent(to, intent) ?? handleManualCartLogic(to, userMessage);
+        const conversationalReply = await generateConversationalResponse(userMessage, history);
+        const finalReply = combineReply(actionResult, conversationalReply);
 
-        if (editCommand) {
-          if (editCommand.type === "clear") {
-            clearCart(to);
-            await sendWhatsAppMessage(to, "Tu carrito ha sido vaciado.");
-            res.status(200).json({ status: "ok" });
-            return;
-          }
-
-          if (editCommand.type === "remove") {
-            const removedItem = removeCartItem(to, editCommand.itemIndex);
-
-            if (!removedItem) {
-              await sendWhatsAppMessage(to, "Ese producto no existe en tu carrito");
-            } else {
-              await sendWhatsAppMessage(to, `Eliminaste ${removedItem.name} del carrito`);
-            }
-
-            res.status(200).json({ status: "ok" });
-            return;
-          }
-
-          const updatedItem = updateCartItemQuantity(to, editCommand.itemIndex, editCommand.quantity);
-
-          if (!updatedItem) {
-            await sendWhatsAppMessage(to, "Ese producto no existe en tu carrito");
-          } else {
-            await sendWhatsAppMessage(to, `Actualizaste ${updatedItem.name} a x${editCommand.quantity}`);
-          }
-
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        const selection = parseMenuSelection(userMessage);
-
-        if (selection) {
-          const itemIndex = selection.itemIndex - 1;
-          const item = sushiMenu[itemIndex] as SushiMenuItem | undefined;
-
-          if (item) {
-            const cartItem = addToCart(to, item, selection.quantity, selection.extras, selection.modifiers);
-            await sendWhatsAppMessage(to, buildAddConfirmation(cartItem, selection.quantity));
-          } else {
-            await sendWhatsAppMessage(to, "Ese numero no existe en el menu");
-          }
-
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        if (normalizedMessage === "carrito") {
-          await sendWhatsAppMessage(to, getCartSummary(to));
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        if (normalizedMessage === "cancelar") {
-          clearCart(to);
-          await sendWhatsAppMessage(to, "Tu carrito ha sido cancelado");
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        const aiAction = await generateAIResponse(userMessage);
-        console.log("AI action:", JSON.stringify(aiAction));
-
-        if (aiAction.action === "show_menu") {
-          await sendWhatsAppMessage(to, formatMenu(sushiMenu));
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        if (aiAction.action === "add_to_cart") {
-          const confirmations = aiAction.items
-            .map((requestedItem) => {
-              if (typeof requestedItem.id !== "number" && typeof requestedItem.id !== "string") {
-                return null;
-              }
-
-              const item = resolveMenuItemFromAI(requestedItem.id);
-
-              if (!item) {
-                return null;
-              }
-
-              const quantity = requestedItem.quantity ?? 1;
-              const cartItem = addToCart(to, item, quantity, [], []);
-              return buildAddConfirmation(cartItem, quantity);
-            })
-            .filter((messageText): messageText is string => Boolean(messageText));
-
-          await sendWhatsAppMessage(
-            to,
-            confirmations.length > 0 ? confirmations.join("\n\n") : "No encontre esos productos en el menu."
-          );
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        if (aiAction.action === "view_cart") {
-          await sendWhatsAppMessage(to, getCartSummary(to));
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        if (aiAction.action === "remove_items") {
-          const removals = aiAction.items
-            .map((requestedItem) => {
-              if (typeof requestedItem.id !== "number" && typeof requestedItem.id !== "string") {
-                return null;
-              }
-
-              const item = resolveMenuItemFromAI(requestedItem.id);
-
-              if (!item) {
-                return null;
-              }
-
-              const removedItems = removeCartItemsByProductId(to, item.id, requestedItem.quantity ?? 1);
-              if (removedItems.length === 0) {
-                return null;
-              }
-
-              return `Eliminaste ${item.name} del carrito`;
-            })
-            .filter((messageText): messageText is string => Boolean(messageText));
-
-          await sendWhatsAppMessage(
-            to,
-            removals.length > 0 ? removals.join("\n") : "No pude identificar que producto quitar del carrito."
-          );
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        if (aiAction.action === "recommend") {
-          await sendWhatsAppMessage(to, formatRecommendations(sushiMenu));
-          res.status(200).json({ status: "ok" });
-          return;
-        }
-
-        await sendWhatsAppMessage(to, aiAction.message || FALLBACK_CHAT_MESSAGE);
+        await sendWhatsAppMessage(to, finalReply);
+        saveConversationTurn(to, userMessage, finalReply);
       }
 
       res.status(200).json({ status: "ok" });
