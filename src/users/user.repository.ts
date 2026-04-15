@@ -10,3 +10,17 @@ export async function findUserByWhatsappId(whatsappUserId: string): Promise<User
   });
 }
 
+export async function findOrCreateUserByWhatsappId(whatsappUserId: string): Promise<User> {
+  const existingUser = await findUserByWhatsappId(whatsappUserId);
+
+  if (existingUser) {
+    return existingUser;
+  }
+
+  return prisma.user.create({
+    data: {
+      whatsappUserId,
+      phoneNumber: whatsappUserId,
+    },
+  });
+}
