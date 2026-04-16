@@ -1,4 +1,4 @@
-import { buildIntentPrompt } from "./prompt.service";
+﻿import { buildIntentPrompt } from "./prompt.service";
 import { findMenuItemByName, findMatchingExtra, findMatchingModifier, normalizeText, sushiMenu } from "../menu/sushi-menu";
 
 export type ParsedIntentItem = {
@@ -328,7 +328,7 @@ function parseIntentDeterministically(customerMessage: string, context?: IntentP
   }
 
   if (/\b(menu|carta)\b/.test(normalizedMessage)) {
-    return { intent: "show_menu", items: [], message: "Claro, te muestro el menu." };
+    return { intent: "show_menu", items: [], message: "Claro, te muestro el menú." };
   }
 
   if (/\b(ver carrito|carrito|mi pedido|mi orden)\b/.test(normalizedMessage)) {
@@ -336,7 +336,7 @@ function parseIntentDeterministically(customerMessage: string, context?: IntentP
   }
 
   if (/\b(recomienda|recomendacion|sugerencia|sugiere)\b/.test(normalizedMessage)) {
-    return { intent: "recommend", items: [], message: "Te ayudo con una recomendacion." };
+    return { intent: "recommend", items: [], message: "Te ayudo con una recomendación." };
   }
 
   if (/\b(quiero pagar|proceder al pago|quiero proceder|terminar pedido|finalizar|ya es todo|listo|cerrar pedido|checkout|pagar)\b/.test(normalizedMessage)) {
@@ -415,3 +415,4 @@ export async function parseIntent(customerMessage: string, context?: IntentParse
     status: "deterministic_fallback",
   };
 }
+

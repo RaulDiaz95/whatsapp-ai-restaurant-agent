@@ -16,14 +16,14 @@ type LocalSessionState = {
 
 const memorySessionStore = new Map<string, LocalSessionState>();
 const AI_MISSING_MESSAGE = "IA no configurada correctamente.";
-const AI_FAILURE_MESSAGE = "Lo siento, tuve un problema procesando tu mensaje. Podrias intentar de nuevo?";
+const AI_FAILURE_MESSAGE = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?";
 const deliveryService = new DeliveryService();
 
 function isAddressQuery(text: string): boolean {
   const msg = text.toLowerCase();
   return (
     msg.includes("direccion") ||
-    msg.includes("direcciÃ³n") ||
+    msg.includes("dirección") ||
     msg.includes("donde lo mandas") ||
     msg.includes("confirmar direccion") ||
     msg.includes("mi direccion")
@@ -50,13 +50,13 @@ function isAddressChangeRequest(text: string): boolean {
 
 function buildDeliverySummary(deliveryFee: number, etaMinutes: number, total: number): string {
   return [
-    "Perfecto ðŸ‘ ya tengo tu direcciÃ³n.",
+    "Perfecto 👍 ya tengo tu dirección.",
     "",
-    `ðŸšš EnvÃ­o: $${deliveryFee}`,
-    `â±ï¸ Tiempo estimado: ${etaMinutes} min`,
-    `ðŸ§¾ Total: $${total}`,
+    `🚚 Envío: $${deliveryFee}`,
+    `⏱️ Tiempo estimado: ${etaMinutes} min`,
+    `🧾 Total: $${total}`,
     "",
-    "Â¿Deseas continuar con tu pedido?",
+    "¿Deseas continuar con tu pedido?",
   ].join("\n");
 }
 
@@ -185,10 +185,10 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
 
   if (isAddressQuery(customerMessage)) {
     if (state.address) {
-      return `ðŸ“ Esta es la direcciÃ³n que tengo registrada:\n${state.address}\n\nÂ¿Deseas usar esta direcciÃ³n para tu pedido?`;
+      return `📍 Esta es la dirección que tengo registrada:\n${state.address}\n\n¿Deseas usar esta dirección para tu pedido?`;
     }
 
-    return "AÃºn no tengo una direcciÃ³n registrada. Â¿Me la puedes compartir por favor?";
+    return "Aún no tengo una dirección registrada. ¿Me la puedes compartir por favor?";
   }
 
   const { intent, status } = await parseIntent(customerMessage, {
@@ -237,7 +237,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         deliveryFee: null,
       };
       await persistSessionState(whatsappUserId, state);
-      return "Listo ðŸ§¹ tu carrito quedÃ³ vacÃ­o";
+      return "Listo 🧹 tu carrito quedó vacío";
 
     case "recommend":
       return buildFinalReply({
@@ -250,7 +250,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
 
     case "checkout":
       if (state.cart.items.length === 0) {
-        return "No tienes productos en tu carrito aÃºn ðŸ˜… Â¿Te gustarÃ­a ver el menÃº?";
+        return "No tienes productos en tu carrito aún 😅 ¿Te gustaría ver el menú?";
       }
 
       state = {
@@ -266,7 +266,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
           awaitingAddressConfirmation: true,
         };
         await persistSessionState(whatsappUserId, state);
-        return `ðŸ“ Tengo esta direcciÃ³n registrada:\n${state.address}\n\nÂ¿Quieres usar esta direcciÃ³n o prefieres cambiarla?`;
+        return `📍 Tengo esta dirección registrada:\n${state.address}\n\n¿Quieres usar esta dirección o prefieres cambiarla?`;
       }
 
       state = {
@@ -274,7 +274,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         awaitingAddress: true,
       };
       await persistSessionState(whatsappUserId, state);
-      return "Perfecto ðŸ‘ para continuar con tu pedido, Â¿me puedes compartir tu direcciÃ³n de entrega?";
+      return "Perfecto 👍 para continuar con tu pedido, ¿me puedes compartir tu dirección de entrega?";
 
     case "add_to_cart": {
       if (intent.items.length === 0) {
@@ -321,7 +321,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         lastMentionedItem: intent.items[0]?.name ?? state.lastMentionedItem,
       };
       await persistSessionState(whatsappUserId, state);
-      return ["AgreguÃ©:", ...addedLines].join("\n");
+      return ["Agregué:", ...addedLines].join("\n");
     }
 
     case "remove_item": {
@@ -362,7 +362,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         lastMentionedItem: intent.items[0]?.name ?? state.lastMentionedItem,
       };
       await persistSessionState(whatsappUserId, state);
-      return ["QuitÃ©:", ...removedLines].join("\n");
+      return ["Quité:", ...removedLines].join("\n");
     }
 
     case "unknown":
