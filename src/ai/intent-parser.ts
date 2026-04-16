@@ -1,12 +1,17 @@
 import { buildIntentPrompt } from "./prompt.service";
 import { findMenuItemByName, findMatchingExtra, findMatchingModifier, normalizeText, sushiMenu } from "../menu/sushi-menu";
 
-export type ParsedIntent = {
-  intent: "add_to_cart" | "remove_item" | "show_menu" | "show_cart" | "recommend" | "checkout" | "smalltalk";
-  product: string | null;
-  quantity: number | null;
+export type ParsedIntentItem = {
+  name: string;
+  quantity: number;
   extras: string[];
-  removeIngredients: string[];
+  removals: string[];
+};
+
+export type ParsedIntent = {
+  intent: "add_to_cart" | "remove_item" | "clear_cart" | "view_cart" | "show_menu" | "unknown" | "recommend" | "checkout";
+  items: ParsedIntentItem[];
+  message: string;
 };
 
 export type ParseIntentStatus = "used_openai" | "missing_api_key" | "openai_error" | "deterministic_fallback";
@@ -17,11 +22,9 @@ export type ParseIntentResult = {
 };
 
 const EMPTY_INTENT: ParsedIntent = {
-  intent: "smalltalk",
-  product: null,
-  quantity: null,
-  extras: [],
-  removeIngredients: [],
+  intent: "unknown",
+  items: [],
+  message: "",
 };
 
 function safeJsonParse(value: string): unknown {
@@ -38,30 +41,45 @@ function normalizeIntent(input: unknown): ParsedIntent {
   }
 
   const raw = input as Record<string, unknown>;
-  const allowedIntents = new Set(["add_to_cart", "remove_item", "show_menu", "show_cart", "recommend", "checkout", "smalltalk"]);
-  const intent =
-    typeof raw.intent === "string" && allowedIntents.has(raw.intent) ? (raw.intent as ParsedIntent["intent"]) : "smalltalk";
-  const requestedProduct = typeof raw.product === "string" ? raw.product : "";
-  const matchedMenuItem = requestedProduct ? findMenuItemByName(requestedProduct) : null;
-  const extras = Array.isArray(raw.extras) ? raw.extras.filter((extra): extra is string => typeof extra === "string") : [];
-  const removeIngredients = Array.isArray(raw.removeIngredients)
-    ? raw.removeIngredients.filter((modifier): modifier is string => typeof modifier === "string")
+  const allowedIntents = new Set(["add_to_cart", "remove_item", "clear_cart", "view_cart", "show_menu", "unknown", "recommend", "checkout"]);
+  const intent = typeof raw.intent === "string" && allowedIntents.has(raw.intent) ? (raw.intent as ParsedIntent["intent"]) : "unknown";
+  const message = typeof raw.message === "string" ? raw.message : "";
+  const items = Array.isArray(raw.items)
+    ? raw.items
+        .map((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) {
+            return null;
+          }
+
+          const rawItem = item as Record<string, unknown>;
+          const requestedName = typeof rawItem.name === "string" ? rawItem.name : "";
+          const matchedMenuItem = requestedName ? findMenuItemByName(requestedName) : null;
+          const extras = Array.isArray(rawItem.extras) ? rawItem.extras.filter((extra): extra is string => typeof extra === "string") : [];
+          const removals = Array.isArray(rawItem.removals) ? rawItem.removals.filter((removal): removal is string => typeof removal === "string") : [];
+
+          if (!matchedMenuItem) {
+            return null;
+          }
+
+          return {
+            name: matchedMenuItem.name,
+            quantity:
+              typeof rawItem.quantity === "number" && Number.isFinite(rawItem.quantity) ? Math.max(1, Math.trunc(rawItem.quantity)) : 1,
+            extras: extras
+              .map((extra) => findMatchingExtra(matchedMenuItem, extra)?.name ?? null)
+              .filter((extra): extra is string => extra !== null),
+            removals: removals
+              .map((removal) => findMatchingModifier(matchedMenuItem, removal)?.name ?? null)
+              .filter((removal): removal is string => removal !== null),
+          } satisfies ParsedIntentItem;
+        })
+        .filter((item): item is ParsedIntentItem => item !== null)
     : [];
 
   return {
     intent,
-    product: matchedMenuItem?.name ?? null,
-    quantity: typeof raw.quantity === "number" && Number.isFinite(raw.quantity) ? Math.max(1, Math.trunc(raw.quantity)) : null,
-    extras: matchedMenuItem
-      ? extras
-          .map((extra) => findMatchingExtra(matchedMenuItem, extra)?.name ?? null)
-          .filter((extra): extra is string => extra !== null)
-      : [],
-    removeIngredients: matchedMenuItem
-      ? removeIngredients
-          .map((modifier) => findMatchingModifier(matchedMenuItem, modifier)?.name ?? null)
-          .filter((modifier): modifier is string => modifier !== null)
-      : removeIngredients,
+    items,
+    message,
   };
 }
 
@@ -134,6 +152,13 @@ function extractQuantity(segment: string): number {
   return 1;
 }
 
+function splitItemSegments(message: string): string[] {
+  return message
+    .split(/\s+y\s+|,/i)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
 function extractExtrasForItem(segment: string, itemName: string): string[] {
   const menuItem = findMenuItemByName(itemName);
   if (!menuItem) {
@@ -183,71 +208,97 @@ function extractModifiersForItem(segment: string, itemName: string): string[] {
   return [...modifiers];
 }
 
-function extractProductFromMessage(message: string): string | null {
+function extractItemsFromMessage(message: string): ParsedIntentItem[] {
   const normalizedMessage = normalizeText(message);
+  const segments = splitItemSegments(message);
+  const items: ParsedIntentItem[] = [];
 
-  for (const menuItem of sushiMenu) {
-    const candidates = [menuItem.name, ...(menuItem.aliases ?? [])];
-    if (candidates.some((candidate) => normalizedMessage.includes(normalizeText(candidate)))) {
-      return menuItem.name;
+  for (const segment of segments) {
+    for (const menuItem of sushiMenu) {
+      const candidates = [menuItem.name, ...(menuItem.aliases ?? [])];
+      const matchedCandidate = candidates.find((candidate) => normalizedMessage.includes(normalizeText(candidate)) && normalizeText(segment).includes(normalizeText(candidate)));
+      if (!matchedCandidate) {
+        continue;
+      }
+
+      items.push({
+        name: menuItem.name,
+        quantity: extractQuantity(segment),
+        extras: extractExtrasForItem(segment, menuItem.name),
+        removals: extractModifiersForItem(segment, menuItem.name),
+      });
+      break;
     }
   }
 
+  if (items.length > 0) {
+    return items;
+  }
+
   const fallbackMenuItem = findMenuItemByName(message);
-  return fallbackMenuItem?.name ?? null;
+  if (!fallbackMenuItem) {
+    return [];
+  }
+
+  return [
+    {
+      name: fallbackMenuItem.name,
+      quantity: extractQuantity(message),
+      extras: extractExtrasForItem(message, fallbackMenuItem.name),
+      removals: extractModifiersForItem(message, fallbackMenuItem.name),
+    },
+  ];
 }
 
 function parseIntentDeterministically(customerMessage: string): ParsedIntent {
   const normalizedMessage = normalizeText(customerMessage);
-  const product = extractProductFromMessage(customerMessage);
+  const items = extractItemsFromMessage(customerMessage);
 
   if (!normalizedMessage) {
     return EMPTY_INTENT;
   }
 
+  if (/\b(elimina todo|limpiar carrito|borra todo|vaciar carrito)\b/.test(normalizedMessage)) {
+    return { intent: "clear_cart", items: [], message: "Listo, limpio el carrito." };
+  }
+
   if (/\b(menu|carta)\b/.test(normalizedMessage)) {
-    return { intent: "show_menu", product: null, quantity: null, extras: [], removeIngredients: [] };
+    return { intent: "show_menu", items: [], message: "Claro, te muestro el menu." };
   }
 
   if (/\b(ver carrito|carrito|mi pedido|mi orden)\b/.test(normalizedMessage)) {
-    return { intent: "show_cart", product: null, quantity: null, extras: [], removeIngredients: [] };
+    return { intent: "view_cart", items: [], message: "Claro, reviso tu carrito." };
   }
 
   if (/\b(recomienda|recomendacion|sugerencia|sugiere)\b/.test(normalizedMessage)) {
-    return { intent: "recommend", product: null, quantity: null, extras: [], removeIngredients: [] };
+    return { intent: "recommend", items: [], message: "Te ayudo con una recomendacion." };
   }
 
   if (/\b(finalizar|checkout|pagar|terminar pedido)\b/.test(normalizedMessage)) {
-    return { intent: "checkout", product: null, quantity: null, extras: [], removeIngredients: [] };
+    return { intent: "checkout", items: [], message: "Vamos a finalizar tu pedido." };
   }
 
   if (/\b(quita|elimina|remueve|remove)\b/.test(normalizedMessage)) {
     return {
       intent: "remove_item",
-      product,
-      quantity: extractQuantity(customerMessage),
-      extras: [],
-      removeIngredients: [],
+      items,
+      message: "Entendido, retiro eso de tu carrito.",
     };
   }
 
   if (/\b(agrega|agregar|quiero|dame|pon|anade|ordena|pide)\b/.test(normalizedMessage)) {
     return {
       intent: "add_to_cart",
-      product,
-      quantity: product ? extractQuantity(customerMessage) : null,
-      extras: product ? extractExtrasForItem(customerMessage, product) : [],
-      removeIngredients: product ? extractModifiersForItem(customerMessage, product) : [],
+      items,
+      message: "Perfecto, lo agrego a tu pedido.",
     };
   }
 
-  if (product) {
+  if (items.length > 0) {
     return {
       intent: "add_to_cart",
-      product,
-      quantity: extractQuantity(customerMessage),
-      extras: extractExtrasForItem(customerMessage, product),
-      removeIngredients: extractModifiersForItem(customerMessage, product),
+      items,
+      message: "Perfecto, lo agrego a tu pedido.",
     };
   }
 

@@ -1,6 +1,6 @@
 import { parseIntent } from "../ai/intent-parser";
 import { generateFinalAssistantReply } from "../ai/response-generator.service";
-import { addItemToCart, getCartTotal, removeItemFromCart, type CartState } from "../cart/cart.service";
+import { addItemToCart, clearCart, getCartTotal, removeItemFromCart, type CartState } from "../cart/cart.service";
 import { DeliveryService } from "../delivery/delivery.service";
 import { getCartFromSession, getOrCreateActiveSession, getSessionContext, saveSessionContext, type SessionContext } from "../sessions/session.repository";
 import { findOrCreateUserByWhatsappId } from "../users/user.repository";
@@ -176,7 +176,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
     return AI_MISSING_MESSAGE;
   }
 
-  if (status === "openai_error" && intent.intent === "smalltalk") {
+  if (status === "openai_error" && intent.intent === "unknown") {
     return AI_FAILURE_MESSAGE;
   }
 
@@ -190,7 +190,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         extraContext: "Show the full menu naturally, using the provided menu context, and briefly invite the customer to order.",
       });
 
-    case "show_cart":
+    case "view_cart":
       return buildFinalReply({
         userMessage: customerMessage,
         intent: intent.intent,
@@ -198,6 +198,15 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         state,
         extraContext: "Summarize the current cart naturally using the provided cart context.",
       });
+
+    case "clear_cart":
+      state = {
+        ...state,
+        cart: clearCart(),
+        deliveryFee: null,
+      };
+      await persistSessionState(whatsappUserId, state);
+      return "Listo 🧹 tu carrito quedó vacío";
 
     case "recommend":
       return buildFinalReply({
@@ -249,7 +258,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
       });
 
     case "add_to_cart": {
-      if (!intent.product) {
+      if (intent.items.length === 0) {
         return buildFinalReply({
           userMessage: customerMessage,
           intent: intent.intent,
@@ -259,18 +268,29 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         });
       }
 
-      const result = addItemToCart(state.cart, {
-        name: intent.product,
-        quantity: intent.quantity ?? 1,
-        extras: intent.extras,
-        modifiers: intent.removeIngredients,
-      });
+      const addedLines: string[] = [];
+      let nextCart = state.cart;
 
-      if (!result.addedItem) {
+      for (const item of intent.items) {
+        const result = addItemToCart(nextCart, {
+          name: item.name,
+          quantity: item.quantity,
+          extras: item.extras,
+          modifiers: item.removals,
+        });
+
+        nextCart = result.cart;
+
+        if (result.addedItem) {
+          addedLines.push(`- ${result.addedItem.name} x${item.quantity}`);
+        }
+      }
+
+      if (addedLines.length === 0) {
         return buildFinalReply({
           userMessage: customerMessage,
           intent: intent.intent,
-          actionSummary: `The requested product was not found: ${intent.product}`,
+          actionSummary: "No requested products were found in the menu.",
           state,
           extraContext: "Politely say the product was not found and guide the user toward the menu.",
         });
@@ -278,24 +298,14 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
 
       state = {
         ...state,
-        cart: result.cart,
+        cart: nextCart,
       };
       await persistSessionState(whatsappUserId, state);
-
-      const extrasText = result.addedItem.extras.length > 0 ? ` Extras: ${result.addedItem.extras.map((extra) => extra.name).join(", ")}.` : "";
-      const modifiersText = result.addedItem.modifiers.length > 0 ? ` Remove ingredients: ${result.addedItem.modifiers.join(", ")}.` : "";
-
-      return buildFinalReply({
-        userMessage: customerMessage,
-        intent: intent.intent,
-        actionSummary: `Added ${result.addedItem.quantity} x ${result.addedItem.name} to the cart.${extrasText}${modifiersText} Cart total: $${getCartTotal(state.cart)}.`,
-        state,
-        extraContext: "Confirm the add-to-cart action naturally and mention the current total if helpful.",
-      });
+      return ["Agregué:", ...addedLines].join("\n");
     }
 
     case "remove_item": {
-      if (!intent.product) {
+      if (intent.items.length === 0) {
         return buildFinalReply({
           userMessage: customerMessage,
           intent: intent.intent,
@@ -305,13 +315,22 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         });
       }
 
-      const result = removeItemFromCart(state.cart, { name: intent.product });
+      const removedLines: string[] = [];
+      let nextCart = state.cart;
 
-      if (!result.removedItem) {
+      for (const item of intent.items) {
+        const result = removeItemFromCart(nextCart, { name: item.name });
+        nextCart = result.cart;
+        if (result.removedItem) {
+          removedLines.push(`- ${result.removedItem.name}`);
+        }
+      }
+
+      if (removedLines.length === 0) {
         return buildFinalReply({
           userMessage: customerMessage,
           intent: intent.intent,
-          actionSummary: `The requested product was not found in the cart: ${intent.product}`,
+          actionSummary: "The requested products were not found in the cart.",
           state,
           extraContext: "Politely say the product was not found in the cart.",
         });
@@ -319,19 +338,13 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
 
       state = {
         ...state,
-        cart: result.cart,
+        cart: nextCart,
       };
       await persistSessionState(whatsappUserId, state);
-      return buildFinalReply({
-        userMessage: customerMessage,
-        intent: intent.intent,
-        actionSummary: `Removed ${result.removedItem.name} from the cart. Cart total: $${getCartTotal(state.cart)}.`,
-        state,
-        extraContext: "Confirm the remove action naturally.",
-      });
+      return ["Quité:", ...removedLines].join("\n");
     }
 
-    case "smalltalk":
+    case "unknown":
     default:
       if (status === "openai_error") {
         return AI_FAILURE_MESSAGE;

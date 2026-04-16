@@ -25,6 +25,10 @@ export function getCartTotal(cart: CartState): number {
   return cart.items.reduce((sum, item) => sum + getCartLineTotal(item), 0);
 }
 
+export function clearCart(): CartState {
+  return { items: [] };
+}
+
 export function addItemToCart(
   cart: CartState,
   input: { name: string; quantity?: number; extras?: string[]; modifiers?: string[] },
