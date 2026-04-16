@@ -232,13 +232,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
 
     case "checkout":
       if (state.cart.items.length === 0) {
-        return buildFinalReply({
-          userMessage: customerMessage,
-          intent: intent.intent,
-          actionSummary: "The cart is empty, so checkout cannot start yet.",
-          state,
-          extraContext: "Politely say the cart is empty and invite the customer to order first.",
-        });
+        return "No tienes productos en tu carrito aún 😅 ¿Te gustaría ver el menú?";
       }
 
       state = {
@@ -262,13 +256,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         awaitingAddress: true,
       };
       await persistSessionState(whatsappUserId, state);
-      return buildFinalReply({
-        userMessage: customerMessage,
-        intent: intent.intent,
-        actionSummary: "Checkout started. Ask for the delivery address.",
-        state,
-        extraContext: "Ask directly for the delivery address in a natural way.",
-      });
+      return "Perfecto 👍 para continuar con tu pedido, ¿me puedes compartir tu dirección de entrega?";
 
     case "add_to_cart": {
       if (intent.items.length === 0) {

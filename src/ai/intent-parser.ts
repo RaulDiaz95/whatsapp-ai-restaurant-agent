@@ -323,7 +323,7 @@ function parseIntentDeterministically(customerMessage: string, context?: IntentP
     return { intent: "recommend", items: [], message: "Te ayudo con una recomendacion." };
   }
 
-  if (/\b(finalizar|checkout|pagar|terminar pedido)\b/.test(normalizedMessage)) {
+  if (/\b(quiero pagar|proceder al pago|quiero proceder|terminar pedido|finalizar|ya es todo|listo|cerrar pedido|checkout|pagar)\b/.test(normalizedMessage)) {
     return { intent: "checkout", items: [], message: "Vamos a finalizar tu pedido." };
   }
 
