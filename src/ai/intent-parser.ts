@@ -14,6 +14,13 @@ export type ParsedIntent = {
   index: number | null;
 };
 
+export type ParseIntentStatus = "used_openai" | "missing_api_key" | "openai_error" | "explicit_command" | "deterministic_fallback";
+
+export type ParseIntentResult = {
+  intent: ParsedIntent;
+  status: ParseIntentStatus;
+};
+
 const EMPTY_INTENT: ParsedIntent = {
   action: "none",
   items: [],
@@ -78,6 +85,7 @@ function normalizeIntent(input: unknown): ParsedIntent {
 
 function getOpenAiApiKey(): string | null {
   const apiKey = process.env.OPENAI_API_KEY;
+  console.log("OPENAI KEY:", apiKey && apiKey.trim().length > 0 ? "EXISTS" : "MISSING");
   return apiKey && apiKey.trim().length > 0 ? apiKey : null;
 }
 
@@ -88,27 +96,46 @@ async function parseIntentWithOpenAI(customerMessage: string): Promise<ParsedInt
     return null;
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-5-mini",
-      input: buildOrderingPrompt(customerMessage),
+      model: "gpt-4o-mini",
+      response_format: {
+        type: "json_object",
+      },
+      messages: [
+        {
+          role: "system",
+          content: buildOrderingPrompt(customerMessage),
+        },
+        {
+          role: "user",
+          content: customerMessage,
+        },
+      ],
     }),
   });
 
   if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    console.error("OpenAI error:", errorText);
     throw new Error(`OpenAI request failed with status ${response.status}`);
   }
 
   const payload = (await response.json()) as {
-    output_text?: string;
+    choices?: Array<{
+      message?: {
+        content?: string;
+      };
+    }>;
   };
 
-  return normalizeIntent(safeJsonParse(payload.output_text ?? ""));
+  const content = payload.choices?.[0]?.message?.content ?? "";
+  return normalizeIntent(safeJsonParse(content));
 }
 
 function extractQuantity(segment: string): number {
@@ -271,15 +298,56 @@ function parseIntentDeterministically(customerMessage: string): ParsedIntent {
   return EMPTY_INTENT;
 }
 
-export async function parseIntent(customerMessage: string): Promise<ParsedIntent> {
+function parseExplicitCommand(customerMessage: string): ParsedIntent | null {
+  const normalizedMessage = normalizeText(customerMessage);
+
+  if (/\b(menu|carta)\b/.test(normalizedMessage)) {
+    return { action: "show_menu", items: [], index: null };
+  }
+
+  if (/\b(ver carrito|carrito|mi pedido|mi orden)\b/.test(normalizedMessage)) {
+    return { action: "view_cart", items: [], index: null };
+  }
+
+  return null;
+}
+
+export async function parseIntent(customerMessage: string): Promise<ParseIntentResult> {
+  const explicitCommand = parseExplicitCommand(customerMessage);
+
+  if (explicitCommand) {
+    return {
+      intent: explicitCommand,
+      status: "explicit_command",
+    };
+  }
+
+  if (!getOpenAiApiKey()) {
+    return {
+      intent: parseIntentDeterministically(customerMessage),
+      status: "missing_api_key",
+    };
+  }
+
   try {
     const aiIntent = await parseIntentWithOpenAI(customerMessage);
     if (aiIntent) {
-      return aiIntent;
+      return {
+        intent: aiIntent,
+        status: "used_openai",
+      };
     }
-  } catch {
-    // Fall back to deterministic parsing without breaking the conversation.
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("OpenAI error:", errorMessage);
+    return {
+      intent: parseIntentDeterministically(customerMessage),
+      status: "openai_error",
+    };
   }
 
-  return parseIntentDeterministically(customerMessage);
+  return {
+    intent: parseIntentDeterministically(customerMessage),
+    status: "deterministic_fallback",
+  };
 }

@@ -5,6 +5,8 @@ import { getCartFromSession, getOrCreateActiveSession, saveCartToSession } from 
 import { findOrCreateUserByWhatsappId } from "../users/user.repository";
 
 const memoryCartStore = new Map<string, CartState>();
+const AI_ERROR_MESSAGE = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrias intentar de nuevo?";
+const AI_MISSING_MESSAGE = "⚠️ IA no configurada correctamente";
 
 function formatAddedItemMessage(item: {
   name: string;
@@ -63,7 +65,7 @@ export async function getStoredCart(whatsappUserId: string): Promise<CartState> 
 }
 
 export async function handleOrderingMessage(whatsappUserId: string, customerMessage: string): Promise<string> {
-  const intent = await parseIntent(customerMessage);
+  const { intent, status } = await parseIntent(customerMessage);
   let cart = await getStoredCart(whatsappUserId);
 
   switch (intent.action) {
@@ -130,7 +132,15 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
 
     case "none":
     default:
-      return "Claro. Puedo ayudarte con el menu, recomendaciones, agregar productos o ver tu carrito.";
+      if (status === "missing_api_key") {
+        return AI_MISSING_MESSAGE;
+      }
+
+      if (status === "openai_error") {
+        return AI_ERROR_MESSAGE;
+      }
+
+      return AI_ERROR_MESSAGE;
   }
 }
 
