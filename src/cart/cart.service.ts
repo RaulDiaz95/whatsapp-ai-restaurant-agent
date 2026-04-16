@@ -29,6 +29,22 @@ export function clearCart(): CartState {
   return { items: [] };
 }
 
+function extrasMatch(left: CartItem["extras"], right: CartItem["extras"]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((extra, index) => extra.name === right[index]?.name && extra.price === right[index]?.price);
+}
+
+function modifiersMatch(left: CartItem["modifiers"], right: CartItem["modifiers"]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((modifier, index) => modifier === right[index]);
+}
+
 export function addItemToCart(
   cart: CartState,
   input: { name: string; quantity?: number; extras?: string[]; modifiers?: string[] },
@@ -57,10 +73,41 @@ export function addItemToCart(
     modifiers,
   };
 
+  const existingItemIndex = cart.items.findIndex(
+    (item) =>
+      item.name === addedItem.name &&
+      item.basePrice === addedItem.basePrice &&
+      extrasMatch(item.extras, addedItem.extras) &&
+      modifiersMatch(item.modifiers, addedItem.modifiers),
+  );
+
+  if (existingItemIndex >= 0) {
+    const nextItems = cart.items.map((item, index) =>
+      index === existingItemIndex
+        ? {
+            ...item,
+            quantity: item.quantity + addedItem.quantity,
+          }
+        : item,
+    );
+
+    const updatedItem = nextItems[existingItemIndex] ?? null;
+    const nextCart = { items: nextItems };
+    console.log("CART AFTER ADD:", nextCart);
+
+    return {
+      cart: nextCart,
+      addedItem: updatedItem,
+    };
+  }
+
+  const nextCart = {
+    items: [...cart.items, addedItem],
+  };
+  console.log("CART AFTER ADD:", nextCart);
+
   return {
-    cart: {
-      items: [...cart.items, addedItem],
-    },
+    cart: nextCart,
     addedItem,
   };
 }
