@@ -7,6 +7,7 @@ import { createEmptyCart } from "../cart/cart.service";
 export type SessionContext = {
   cart?: CartState;
   awaitingAddress?: boolean;
+  awaitingAddressConfirmation?: boolean;
   address?: string | null;
   deliveryFee?: number | null;
 };
