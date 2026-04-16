@@ -1,8 +1,8 @@
 import type { CartState } from "../cart/cart.service";
 import { buildFinalResponsePrompt } from "./prompt.service";
 
-const AI_MISSING_MESSAGE = "⚠️ IA no configurada correctamente";
-const AI_FAILURE_MESSAGE = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrias intentar de nuevo?";
+const AI_MISSING_MESSAGE = "IA no configurada correctamente.";
+const AI_FAILURE_MESSAGE = "Lo siento, tuve un problema procesando tu mensaje. Podrias intentar de nuevo?";
 
 function getOpenAiApiKey(): string | null {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -36,6 +36,10 @@ export async function generateFinalAssistantReply(input: {
           {
             role: "system",
             content: buildFinalResponsePrompt(input),
+          },
+          {
+            role: "user",
+            content: input.userMessage,
           },
         ],
       }),

@@ -1,14 +1,7 @@
 import { parseIntent } from "../ai/intent-parser";
 import { generateFinalAssistantReply } from "../ai/response-generator.service";
-import { addItemToCart, formatCart, getCartTotal, removeItemFromCart, type CartState } from "../cart/cart.service";
-import { formatMenu, sushiMenu } from "../menu/sushi-menu";
-import {
-  getCartFromSession,
-  getOrCreateActiveSession,
-  getSessionContext,
-  saveSessionContext,
-  type SessionContext,
-} from "../sessions/session.repository";
+import { addItemToCart, getCartTotal, removeItemFromCart, type CartState } from "../cart/cart.service";
+import { getCartFromSession, getOrCreateActiveSession, getSessionContext, saveSessionContext, type SessionContext } from "../sessions/session.repository";
 import { findOrCreateUserByWhatsappId } from "../users/user.repository";
 
 type LocalSessionState = {
@@ -18,7 +11,8 @@ type LocalSessionState = {
 };
 
 const memorySessionStore = new Map<string, LocalSessionState>();
-const OUT_OF_SCOPE_REPLY = "Claro 😊 puedo ayudarte con tu pedido, recomendaciones o resolver dudas del menú.";
+const AI_MISSING_MESSAGE = "IA no configurada correctamente.";
+const AI_FAILURE_MESSAGE = "Lo siento, tuve un problema procesando tu mensaje. Podrias intentar de nuevo?";
 
 function toLocalSessionState(context?: SessionContext): LocalSessionState {
   return {
@@ -26,11 +20,6 @@ function toLocalSessionState(context?: SessionContext): LocalSessionState {
     awaitingAddress: context?.awaitingAddress ?? false,
     address: context?.address ?? null,
   };
-}
-
-function formatRecommendations(): string {
-  const picks = sushiMenu.slice(0, 3);
-  return ["Te recomiendo:", ...picks.map((item) => `${item.name} - $${item.price}`)].join("\n");
 }
 
 async function persistSessionState(whatsappUserId: string, state: LocalSessionState): Promise<void> {
@@ -107,11 +96,11 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
   const { intent, status } = await parseIntent(customerMessage);
 
   if (status === "missing_api_key") {
-    return "⚠️ IA no configurada correctamente";
+    return AI_MISSING_MESSAGE;
   }
 
   if (status === "openai_error" && intent.intent === "smalltalk") {
-    return "Lo siento, tuve un problema procesando tu mensaje. ¿Podrias intentar de nuevo?";
+    return AI_FAILURE_MESSAGE;
   }
 
   switch (intent.intent) {
@@ -119,27 +108,27 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
       return buildFinalReply({
         userMessage: customerMessage,
         intent: intent.intent,
-        actionSummary: formatMenu(),
+        actionSummary: "The customer asked to see the menu.",
         state,
-        extraContext: "Show the menu naturally and briefly invite the customer to order.",
+        extraContext: "Show the full menu naturally, using the provided menu context, and briefly invite the customer to order.",
       });
 
     case "show_cart":
       return buildFinalReply({
         userMessage: customerMessage,
         intent: intent.intent,
-        actionSummary: formatCart(state.cart),
+        actionSummary: "The customer asked to see the current cart.",
         state,
-        extraContext: "Summarize the cart naturally.",
+        extraContext: "Summarize the current cart naturally using the provided cart context.",
       });
 
     case "recommend":
       return buildFinalReply({
         userMessage: customerMessage,
         intent: intent.intent,
-        actionSummary: formatRecommendations(),
+        actionSummary: "The customer wants a recommendation.",
         state,
-        extraContext: "Recommend a few menu items naturally.",
+        extraContext: "Recommend 2 or 3 items naturally from the menu context. Do not use a fixed template. Briefly explain why they fit.",
       });
 
     case "checkout":
@@ -163,7 +152,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         intent: intent.intent,
         actionSummary: "Checkout started. Ask for the delivery address.",
         state,
-        extraContext: "Ask directly for the delivery address.",
+        extraContext: "Ask directly for the delivery address in a natural way.",
       });
 
     case "add_to_cart": {
@@ -252,15 +241,15 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
     case "smalltalk":
     default:
       if (status === "openai_error") {
-        return "Lo siento, tuve un problema procesando tu mensaje. ¿Podrias intentar de nuevo?";
+        return AI_FAILURE_MESSAGE;
       }
 
       return buildFinalReply({
         userMessage: customerMessage,
         intent: intent.intent,
-        actionSummary: OUT_OF_SCOPE_REPLY,
+        actionSummary: "No restaurant action was executed.",
         state,
-        extraContext: "If the user is chatting or asking something outside the restaurant flow, reply politely and redirect to ordering help.",
+        extraContext: "Reply naturally. If the user is chatting, engage briefly and helpfully. If they are outside the restaurant flow, gently redirect them toward menu help, recommendations, cart, or checkout.",
       });
   }
 }

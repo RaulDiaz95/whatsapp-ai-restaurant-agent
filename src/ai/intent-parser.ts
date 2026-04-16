@@ -9,7 +9,7 @@ export type ParsedIntent = {
   removeIngredients: string[];
 };
 
-export type ParseIntentStatus = "used_openai" | "missing_api_key" | "openai_error" | "explicit_command" | "deterministic_fallback";
+export type ParseIntentStatus = "used_openai" | "missing_api_key" | "openai_error" | "deterministic_fallback";
 
 export type ParseIntentResult = {
   intent: ParsedIntent;
@@ -254,30 +254,7 @@ function parseIntentDeterministically(customerMessage: string): ParsedIntent {
   return EMPTY_INTENT;
 }
 
-function parseExplicitCommand(customerMessage: string): ParsedIntent | null {
-  const normalizedMessage = normalizeText(customerMessage);
-
-  if (/\b(menu|carta)\b/.test(normalizedMessage)) {
-    return { intent: "show_menu", product: null, quantity: null, extras: [], removeIngredients: [] };
-  }
-
-  if (/\b(ver carrito|carrito|mi pedido|mi orden)\b/.test(normalizedMessage)) {
-    return { intent: "show_cart", product: null, quantity: null, extras: [], removeIngredients: [] };
-  }
-
-  return null;
-}
-
 export async function parseIntent(customerMessage: string): Promise<ParseIntentResult> {
-  const explicitCommand = parseExplicitCommand(customerMessage);
-
-  if (explicitCommand) {
-    return {
-      intent: explicitCommand,
-      status: "explicit_command",
-    };
-  }
-
   if (!getOpenAiApiKey()) {
     return {
       intent: parseIntentDeterministically(customerMessage),
