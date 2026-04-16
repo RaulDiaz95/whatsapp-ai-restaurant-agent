@@ -2,6 +2,7 @@
 import { generateFinalAssistantReply } from "../ai/response-generator.service";
 import { addItemToCart, clearCart, getCartTotal, removeItemFromCart, type CartState } from "../cart/cart.service";
 import { DeliveryService } from "../delivery/delivery.service";
+import { createPaymentLink } from "../services/mercadoPago.service";
 import { getCartFromSession, getOrCreateActiveSession, getSessionContext, saveSessionContext, type SessionContext } from "../sessions/session.repository";
 import { findOrCreateUserByWhatsappId } from "../users/user.repository";
 
@@ -46,6 +47,17 @@ function isSavedAddressConfirmation(text: string): boolean {
 function isAddressChangeRequest(text: string): boolean {
   const msg = text.toLowerCase().trim();
   return msg.includes("cambiar") || msg.includes("otra direccion") || msg.includes("otra dirección") || msg.includes("no");
+}
+
+function isOrderConfirmation(text: string): boolean {
+  const msg = text.toLowerCase().trim();
+  return (
+    msg.includes("confirmar") ||
+    msg.includes("confirmo") ||
+    msg.includes("si confirmar") ||
+    msg.includes("sí confirmar") ||
+    msg.includes("confirmar pedido")
+  );
 }
 
 function buildDeliverySummary(deliveryFee: number, etaMinutes: number, total: number): string {
@@ -189,6 +201,45 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
     }
 
     return "Aún no tengo una dirección registrada. ¿Me la puedes compartir por favor?";
+  }
+
+  if (isOrderConfirmation(customerMessage)) {
+    if (!state.cart.items || state.cart.items.length === 0) {
+      return "No tienes productos en tu carrito 😅";
+    }
+
+    const cartTotal = getCartTotal(state.cart);
+    const deliveryFee = state.deliveryFee ?? 0;
+    const total = cartTotal + deliveryFee;
+
+    try {
+      const paymentLink = await createPaymentLink(total);
+
+      state = {
+        ...state,
+        awaitingAddress: false,
+        awaitingAddressConfirmation: false,
+      };
+      await persistSessionState(whatsappUserId, state);
+
+      return `Perfecto 🚀
+
+Tu pedido está confirmado.
+
+🧾 Resumen:
+- Productos: $${cartTotal}
+- Envío: $${deliveryFee}
+
+💵 Total: $${total}
+
+Puedes pagar aquí:
+👉 ${paymentLink}
+
+Una vez realizado el pago, comenzamos la preparación 🍣`;
+    } catch (error) {
+      console.error(error);
+      return "Hubo un problema generando el link de pago 😅 intenta de nuevo.";
+    }
   }
 
   const { intent, status } = await parseIntent(customerMessage, {
