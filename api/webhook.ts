@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 import { handleOrderingMessage } from "../src/orders/order-assistant.service";
 import { sendTextMessage } from "../src/services/whatsapp";
+import { touchUserActivity } from "../src/users/user.repository";
 import { getWhatsappEnv } from "../src/utils/env";
 
 type WhatsAppWebhookBody = {
@@ -60,6 +61,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
+    await touchUserActivity(incomingMessage.from);
     const reply = await handleOrderingMessage(incomingMessage.from, incomingMessage.text);
     await sendTextMessage(incomingMessage.from, reply);
 

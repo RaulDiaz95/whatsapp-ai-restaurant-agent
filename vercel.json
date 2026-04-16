@@ -3,8 +3,17 @@
   "framework": null,
   "buildCommand": "npm run build",
   "outputDirectory": ".",
+  "crons": [
+    {
+      "path": "/api/cron/reminders",
+      "schedule": "*/1 * * * *"
+    }
+  ],
   "functions": {
     "api/*.ts": {
+      "maxDuration": 10
+    },
+    "api/**/*.ts": {
       "maxDuration": 10
     }
   }

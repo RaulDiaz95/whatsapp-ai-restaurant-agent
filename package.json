@@ -8,20 +8,21 @@
   },
   "scripts": {
     "postinstall": "prisma generate",
-    "build": "prisma generate && tsc --noEmit",
+    "build": "node scripts/deploy-build.cjs",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy"
   },
   "dependencies": {
     "@prisma/client": "^6.5.0",
     "@upstash/redis": "^1.37.0",
     "@vercel/node": "^5.3.3",
     "dotenv": "^16.4.7",
+    "prisma": "^6.5.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
-    "prisma": "^6.5.0",
     "typescript": "^5.8.2",
     "vercel": "^41.4.1"
   }

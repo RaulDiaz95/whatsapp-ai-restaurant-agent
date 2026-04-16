@@ -28,6 +28,8 @@ model User {
   name            String?
   phoneNumber     String?
   email           String?   @unique
+  lastActivityAt  DateTime?
+  lastReminderSentAt DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   sessions        Session[]

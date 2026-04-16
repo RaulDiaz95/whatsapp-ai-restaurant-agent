@@ -24,3 +24,42 @@ export async function findOrCreateUserByWhatsappId(whatsappUserId: string): Prom
     },
   });
 }
+
+export async function touchUserActivity(whatsappUserId: string): Promise<User> {
+  const user = await findOrCreateUserByWhatsappId(whatsappUserId);
+
+  return prisma.user.update({
+    where: {
+      id: user.id,
+    },
+    data: {
+      lastActivityAt: new Date(),
+      lastReminderSentAt: null,
+    },
+  });
+}
+
+export async function findUsersNeedingReminder(cutoff: Date): Promise<User[]> {
+  return prisma.user.findMany({
+    where: {
+      lastActivityAt: {
+        lt: cutoff,
+      },
+      lastReminderSentAt: null,
+      phoneNumber: {
+        not: null,
+      },
+    },
+  });
+}
+
+export async function markReminderSent(userId: string): Promise<User> {
+  return prisma.user.update({
+    where: {
+      id: userId,
+    },
+    data: {
+      lastReminderSentAt: new Date(),
+    },
+  });
+}
