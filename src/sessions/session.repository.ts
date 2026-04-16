@@ -4,8 +4,10 @@ import { prisma } from "../db/client";
 import type { CartState } from "../cart/cart.service";
 import { createEmptyCart } from "../cart/cart.service";
 
-type SessionContext = {
+export type SessionContext = {
   cart?: CartState;
+  awaitingAddress?: boolean;
+  address?: string | null;
 };
 
 function readContext(session: Session): SessionContext {
@@ -49,12 +51,28 @@ export function getCartFromSession(session: Session): CartState {
   return readContext(session).cart ?? createEmptyCart();
 }
 
-export async function saveCartToSession(sessionId: string, cart: CartState): Promise<Session> {
+export function getSessionContext(session: Session): SessionContext {
+  return readContext(session);
+}
+
+export async function saveSessionContext(sessionId: string, context: SessionContext): Promise<Session> {
   return prisma.session.update({
     where: { id: sessionId },
     data: {
       lastMessageAt: new Date(),
-      contextSnapshot: { cart } satisfies Prisma.InputJsonValue,
+      contextSnapshot: context satisfies Prisma.InputJsonValue,
     },
+  });
+}
+
+export async function saveCartToSession(sessionId: string, cart: CartState): Promise<Session> {
+  const currentSession = await prisma.session.findUnique({
+    where: { id: sessionId },
+  });
+
+  const currentContext = currentSession ? readContext(currentSession) : {};
+  return saveSessionContext(sessionId, {
+    ...currentContext,
+    cart,
   });
 }

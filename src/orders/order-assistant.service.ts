@@ -1,147 +1,273 @@
 import { parseIntent } from "../ai/intent-parser";
+import { generateFinalAssistantReply } from "../ai/response-generator.service";
 import { addItemToCart, formatCart, getCartTotal, removeItemFromCart, type CartState } from "../cart/cart.service";
 import { formatMenu, sushiMenu } from "../menu/sushi-menu";
-import { getCartFromSession, getOrCreateActiveSession, saveCartToSession } from "../sessions/session.repository";
+import {
+  getCartFromSession,
+  getOrCreateActiveSession,
+  getSessionContext,
+  saveSessionContext,
+  type SessionContext,
+} from "../sessions/session.repository";
 import { findOrCreateUserByWhatsappId } from "../users/user.repository";
 
-const memoryCartStore = new Map<string, CartState>();
-const AI_ERROR_MESSAGE = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrias intentar de nuevo?";
-const AI_MISSING_MESSAGE = "⚠️ IA no configurada correctamente";
+type LocalSessionState = {
+  cart: CartState;
+  awaitingAddress: boolean;
+  address: string | null;
+};
 
-function formatAddedItemMessage(item: {
-  name: string;
-  quantity: number;
-  extras: Array<{ name: string; price: number }>;
-  modifiers: string[];
-}): string {
-  const details: string[] = [`Agregue ${item.quantity} x ${item.name}`];
+const memorySessionStore = new Map<string, LocalSessionState>();
+const OUT_OF_SCOPE_REPLY = "Claro 😊 puedo ayudarte con tu pedido, recomendaciones o resolver dudas del menú.";
 
-  if (item.extras.length > 0) {
-    details.push(`con ${item.extras.map((extra) => extra.name).join(", ")}`);
-  }
-
-  if (item.modifiers.length > 0) {
-    details.push(item.modifiers.join(", "));
-  }
-
-  return details.join(" ");
+function toLocalSessionState(context?: SessionContext): LocalSessionState {
+  return {
+    cart: context?.cart ?? { items: [] },
+    awaitingAddress: context?.awaitingAddress ?? false,
+    address: context?.address ?? null,
+  };
 }
 
 function formatRecommendations(): string {
   const picks = sushiMenu.slice(0, 3);
-  return [
-    "Te recomiendo:",
-    ...picks.map((item) => `- ${item.name} - $${item.price}`),
-  ].join("\n");
+  return ["Te recomiendo:", ...picks.map((item) => `${item.name} - $${item.price}`)].join("\n");
 }
 
-async function persistCart(whatsappUserId: string, cart: CartState): Promise<void> {
-  memoryCartStore.set(whatsappUserId, cart);
+async function persistSessionState(whatsappUserId: string, state: LocalSessionState): Promise<void> {
+  memorySessionStore.set(whatsappUserId, state);
 
   try {
     const user = await findOrCreateUserByWhatsappId(whatsappUserId);
     const session = await getOrCreateActiveSession(user.id);
-    await saveCartToSession(session.id, cart);
+    await saveSessionContext(session.id, {
+      cart: state.cart,
+      awaitingAddress: state.awaitingAddress,
+      address: state.address,
+    });
   } catch {
     // Keep the conversation working even if persistence is temporarily unavailable.
   }
 }
 
-export async function getStoredCart(whatsappUserId: string): Promise<CartState> {
-  const memoryCart = memoryCartStore.get(whatsappUserId);
-  if (memoryCart) {
-    return memoryCart;
+async function getStoredSessionState(whatsappUserId: string): Promise<LocalSessionState> {
+  const memoryState = memorySessionStore.get(whatsappUserId);
+  if (memoryState) {
+    return memoryState;
   }
 
   try {
     const user = await findOrCreateUserByWhatsappId(whatsappUserId);
     const session = await getOrCreateActiveSession(user.id);
-    const cart = getCartFromSession(session);
-    memoryCartStore.set(whatsappUserId, cart);
-    return cart;
+    const state = toLocalSessionState({
+      ...getSessionContext(session),
+      cart: getCartFromSession(session),
+    });
+    memorySessionStore.set(whatsappUserId, state);
+    return state;
   } catch {
-    return { items: [] };
+    return toLocalSessionState();
   }
 }
 
+async function buildFinalReply(input: {
+  userMessage: string;
+  intent: string;
+  actionSummary: string;
+  state: LocalSessionState;
+  extraContext?: string;
+}): Promise<string> {
+  return generateFinalAssistantReply({
+    userMessage: input.userMessage,
+    intent: input.intent,
+    actionSummary: input.actionSummary,
+    cart: input.state.cart,
+    extraContext: input.extraContext,
+  });
+}
+
 export async function handleOrderingMessage(whatsappUserId: string, customerMessage: string): Promise<string> {
+  let state = await getStoredSessionState(whatsappUserId);
+
+  if (state.awaitingAddress) {
+    state = {
+      ...state,
+      awaitingAddress: false,
+      address: customerMessage.trim(),
+    };
+    await persistSessionState(whatsappUserId, state);
+    return buildFinalReply({
+      userMessage: customerMessage,
+      intent: "checkout",
+      actionSummary: `Address captured for checkout: ${state.address}`,
+      state,
+      extraContext: "The customer has provided the delivery address. Confirm it naturally and say payment is the next step.",
+    });
+  }
+
   const { intent, status } = await parseIntent(customerMessage);
-  let cart = await getStoredCart(whatsappUserId);
 
-  switch (intent.action) {
+  if (status === "missing_api_key") {
+    return "⚠️ IA no configurada correctamente";
+  }
+
+  if (status === "openai_error" && intent.intent === "smalltalk") {
+    return "Lo siento, tuve un problema procesando tu mensaje. ¿Podrias intentar de nuevo?";
+  }
+
+  switch (intent.intent) {
     case "show_menu":
-      return formatMenu();
+      return buildFinalReply({
+        userMessage: customerMessage,
+        intent: intent.intent,
+        actionSummary: formatMenu(),
+        state,
+        extraContext: "Show the menu naturally and briefly invite the customer to order.",
+      });
 
-    case "view_cart":
-      return formatCart(cart);
+    case "show_cart":
+      return buildFinalReply({
+        userMessage: customerMessage,
+        intent: intent.intent,
+        actionSummary: formatCart(state.cart),
+        state,
+        extraContext: "Summarize the cart naturally.",
+      });
 
     case "recommend":
-      return formatRecommendations();
+      return buildFinalReply({
+        userMessage: customerMessage,
+        intent: intent.intent,
+        actionSummary: formatRecommendations(),
+        state,
+        extraContext: "Recommend a few menu items naturally.",
+      });
+
+    case "checkout":
+      if (state.cart.items.length === 0) {
+        return buildFinalReply({
+          userMessage: customerMessage,
+          intent: intent.intent,
+          actionSummary: "The cart is empty, so checkout cannot start yet.",
+          state,
+          extraContext: "Politely say the cart is empty and invite the customer to order first.",
+        });
+      }
+
+      state = {
+        ...state,
+        awaitingAddress: true,
+      };
+      await persistSessionState(whatsappUserId, state);
+      return buildFinalReply({
+        userMessage: customerMessage,
+        intent: intent.intent,
+        actionSummary: "Checkout started. Ask for the delivery address.",
+        state,
+        extraContext: "Ask directly for the delivery address.",
+      });
 
     case "add_to_cart": {
-      if (intent.items.length === 0) {
-        return "No entendi que producto quieres agregar. Puedes decirme el nombre del rollo.";
+      if (!intent.product) {
+        return buildFinalReply({
+          userMessage: customerMessage,
+          intent: intent.intent,
+          actionSummary: "No valid product was identified from the request.",
+          state,
+          extraContext: "Ask the customer which item they want from the menu.",
+        });
       }
 
-      const addedSummaries: string[] = [];
+      const result = addItemToCart(state.cart, {
+        name: intent.product,
+        quantity: intent.quantity ?? 1,
+        extras: intent.extras,
+        modifiers: intent.removeIngredients,
+      });
 
-      for (const item of intent.items) {
-        const result = addItemToCart(cart, item);
-        cart = result.cart;
-
-        if (result.addedItem) {
-          addedSummaries.push(formatAddedItemMessage(result.addedItem));
-        }
+      if (!result.addedItem) {
+        return buildFinalReply({
+          userMessage: customerMessage,
+          intent: intent.intent,
+          actionSummary: `The requested product was not found: ${intent.product}`,
+          state,
+          extraContext: "Politely say the product was not found and guide the user toward the menu.",
+        });
       }
 
-      if (addedSummaries.length === 0) {
-        return "No encontre ese producto en el menu. Escribe menu y te lo muestro completo.";
-      }
+      state = {
+        ...state,
+        cart: result.cart,
+      };
+      await persistSessionState(whatsappUserId, state);
 
-      await persistCart(whatsappUserId, cart);
-      return `${addedSummaries.join("\n")}\n\n${formatCart(cart)}`;
+      const extrasText = result.addedItem.extras.length > 0 ? ` Extras: ${result.addedItem.extras.map((extra) => extra.name).join(", ")}.` : "";
+      const modifiersText = result.addedItem.modifiers.length > 0 ? ` Remove ingredients: ${result.addedItem.modifiers.join(", ")}.` : "";
+
+      return buildFinalReply({
+        userMessage: customerMessage,
+        intent: intent.intent,
+        actionSummary: `Added ${result.addedItem.quantity} x ${result.addedItem.name} to the cart.${extrasText}${modifiersText} Cart total: $${getCartTotal(state.cart)}.`,
+        state,
+        extraContext: "Confirm the add-to-cart action naturally and mention the current total if helpful.",
+      });
     }
 
     case "remove_item": {
-      const removalTargets = intent.items.length > 0 ? intent.items : [{ name: "", quantity: 1, extras: [], modifiers: [] }];
-      let removedNames: string[] = [];
-
-      if (intent.index !== null) {
-        const result = removeItemFromCart(cart, { index: intent.index });
-        cart = result.cart;
-        if (result.removedItem) {
-          removedNames = [result.removedItem.name];
-        }
-      } else {
-        for (const item of removalTargets) {
-          const result = removeItemFromCart(cart, { name: item.name });
-          cart = result.cart;
-          if (result.removedItem) {
-            removedNames.push(result.removedItem.name);
-          }
-        }
+      if (!intent.product) {
+        return buildFinalReply({
+          userMessage: customerMessage,
+          intent: intent.intent,
+          actionSummary: "No valid product was identified to remove.",
+          state,
+          extraContext: "Ask the customer which item should be removed from the cart.",
+        });
       }
 
-      if (removedNames.length === 0) {
-        return "No encontre ese producto en tu carrito.";
+      const result = removeItemFromCart(state.cart, { name: intent.product });
+
+      if (!result.removedItem) {
+        return buildFinalReply({
+          userMessage: customerMessage,
+          intent: intent.intent,
+          actionSummary: `The requested product was not found in the cart: ${intent.product}`,
+          state,
+          extraContext: "Politely say the product was not found in the cart.",
+        });
       }
 
-      await persistCart(whatsappUserId, cart);
-      return `Elimine: ${removedNames.join(", ")}\n\n${formatCart(cart)}`;
+      state = {
+        ...state,
+        cart: result.cart,
+      };
+      await persistSessionState(whatsappUserId, state);
+      return buildFinalReply({
+        userMessage: customerMessage,
+        intent: intent.intent,
+        actionSummary: `Removed ${result.removedItem.name} from the cart. Cart total: $${getCartTotal(state.cart)}.`,
+        state,
+        extraContext: "Confirm the remove action naturally.",
+      });
     }
 
-    case "none":
+    case "smalltalk":
     default:
-      if (status === "missing_api_key") {
-        return AI_MISSING_MESSAGE;
-      }
-
       if (status === "openai_error") {
-        return AI_ERROR_MESSAGE;
+        return "Lo siento, tuve un problema procesando tu mensaje. ¿Podrias intentar de nuevo?";
       }
 
-      return AI_ERROR_MESSAGE;
+      return buildFinalReply({
+        userMessage: customerMessage,
+        intent: intent.intent,
+        actionSummary: OUT_OF_SCOPE_REPLY,
+        state,
+        extraContext: "If the user is chatting or asking something outside the restaurant flow, reply politely and redirect to ordering help.",
+      });
   }
+}
+
+export async function getStoredCart(whatsappUserId: string): Promise<CartState> {
+  const state = await getStoredSessionState(whatsappUserId);
+  return state.cart;
 }
 
 export function getCartSummaryTotal(cart: CartState): number {
