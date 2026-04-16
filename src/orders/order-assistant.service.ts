@@ -11,6 +11,7 @@ type LocalSessionState = {
   awaitingAddressConfirmation: boolean;
   address: string | null;
   deliveryFee: number | null;
+  lastMentionedItem: string | null;
 };
 
 const memorySessionStore = new Map<string, LocalSessionState>();
@@ -58,6 +59,7 @@ function toLocalSessionState(context?: SessionContext): LocalSessionState {
     awaitingAddressConfirmation: context?.awaitingAddressConfirmation ?? false,
     address: context?.address ?? null,
     deliveryFee: context?.deliveryFee ?? null,
+    lastMentionedItem: context?.lastMentionedItem ?? null,
   };
 }
 
@@ -73,6 +75,7 @@ async function persistSessionState(whatsappUserId: string, state: LocalSessionSt
       awaitingAddressConfirmation: state.awaitingAddressConfirmation,
       address: state.address,
       deliveryFee: state.deliveryFee,
+      lastMentionedItem: state.lastMentionedItem,
     });
   } catch {
     // Keep the conversation working even if persistence is temporarily unavailable.
@@ -170,7 +173,17 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
     return "Aún no tengo una dirección registrada. ¿Me la puedes compartir por favor?";
   }
 
-  const { intent, status } = await parseIntent(customerMessage);
+  const { intent, status } = await parseIntent(customerMessage, {
+    lastMentionedItem: state.lastMentionedItem,
+  });
+
+  if (intent.items.length > 0) {
+    state = {
+      ...state,
+      lastMentionedItem: intent.items[0]?.name ?? state.lastMentionedItem,
+    };
+    await persistSessionState(whatsappUserId, state);
+  }
 
   if (status === "missing_api_key") {
     return AI_MISSING_MESSAGE;
@@ -299,6 +312,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
       state = {
         ...state,
         cart: nextCart,
+        lastMentionedItem: intent.items[0]?.name ?? state.lastMentionedItem,
       };
       await persistSessionState(whatsappUserId, state);
       return ["Agregué:", ...addedLines].join("\n");
@@ -339,6 +353,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
       state = {
         ...state,
         cart: nextCart,
+        lastMentionedItem: intent.items[0]?.name ?? state.lastMentionedItem,
       };
       await persistSessionState(whatsappUserId, state);
       return ["Quité:", ...removedLines].join("\n");

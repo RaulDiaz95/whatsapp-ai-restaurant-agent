@@ -10,6 +10,7 @@ export type SessionContext = {
   awaitingAddressConfirmation?: boolean;
   address?: string | null;
   deliveryFee?: number | null;
+  lastMentionedItem?: string | null;
 };
 
 function readContext(session: Session): SessionContext {

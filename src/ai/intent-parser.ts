@@ -21,6 +21,10 @@ export type ParseIntentResult = {
   status: ParseIntentStatus;
 };
 
+type IntentParserContext = {
+  lastMentionedItem?: string | null;
+};
+
 const EMPTY_INTENT: ParsedIntent = {
   intent: "unknown",
   items: [],
@@ -250,12 +254,57 @@ function extractItemsFromMessage(message: string): ParsedIntentItem[] {
   ];
 }
 
-function parseIntentDeterministically(customerMessage: string): ParsedIntent {
+function buildSingleItemIntent(intent: ParsedIntent["intent"], itemName: string, message: string): ParsedIntent {
+  return {
+    intent,
+    items: [
+      {
+        name: itemName,
+        quantity: 1,
+        extras: [],
+        removals: [],
+      },
+    ],
+    message,
+  };
+}
+
+function isImplicitAddReference(message: string): boolean {
+  const normalizedMessage = normalizeText(message);
+  return (
+    normalizedMessage === "si" ||
+    normalizedMessage === "sí" ||
+    normalizedMessage === "ok" ||
+    normalizedMessage === "agrégalo" ||
+    normalizedMessage === "agregalo" ||
+    normalizedMessage === "lo quiero" ||
+    normalizedMessage === "quiero eso" ||
+    normalizedMessage === "otro" ||
+    normalizedMessage === "otro igual" ||
+    normalizedMessage === "lo mismo"
+  );
+}
+
+function isImplicitRemoveReference(message: string): boolean {
+  const normalizedMessage = normalizeText(message);
+  return normalizedMessage === "quitalo" || normalizedMessage === "quítalo" || normalizedMessage === "elimina ese";
+}
+
+function parseIntentDeterministically(customerMessage: string, context?: IntentParserContext): ParsedIntent {
   const normalizedMessage = normalizeText(customerMessage);
   const items = extractItemsFromMessage(customerMessage);
+  const lastMentionedItem = context?.lastMentionedItem ?? null;
 
   if (!normalizedMessage) {
     return EMPTY_INTENT;
+  }
+
+  if (lastMentionedItem && isImplicitAddReference(customerMessage)) {
+    return buildSingleItemIntent("add_to_cart", lastMentionedItem, "Perfecto, lo agrego a tu pedido.");
+  }
+
+  if (lastMentionedItem && isImplicitRemoveReference(customerMessage)) {
+    return buildSingleItemIntent("remove_item", lastMentionedItem, "Entendido, retiro eso de tu carrito.");
   }
 
   if (/\b(elimina todo|limpiar carrito|borra todo|vaciar carrito)\b/.test(normalizedMessage)) {
@@ -305,10 +354,22 @@ function parseIntentDeterministically(customerMessage: string): ParsedIntent {
   return EMPTY_INTENT;
 }
 
-export async function parseIntent(customerMessage: string): Promise<ParseIntentResult> {
+export async function parseIntent(customerMessage: string, context?: IntentParserContext): Promise<ParseIntentResult> {
+  const contextIntent = parseIntentDeterministically(customerMessage, context);
+  if (
+    contextIntent.items.length > 0 &&
+    ((contextIntent.intent === "add_to_cart" && isImplicitAddReference(customerMessage)) ||
+      (contextIntent.intent === "remove_item" && isImplicitRemoveReference(customerMessage)))
+  ) {
+    return {
+      intent: contextIntent,
+      status: "deterministic_fallback",
+    };
+  }
+
   if (!getOpenAiApiKey()) {
     return {
-      intent: parseIntentDeterministically(customerMessage),
+      intent: parseIntentDeterministically(customerMessage, context),
       status: "missing_api_key",
     };
   }
@@ -325,13 +386,13 @@ export async function parseIntent(customerMessage: string): Promise<ParseIntentR
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error("OpenAI error:", errorMessage);
     return {
-      intent: parseIntentDeterministically(customerMessage),
+      intent: parseIntentDeterministically(customerMessage, context),
       status: "openai_error",
     };
   }
 
   return {
-    intent: parseIntentDeterministically(customerMessage),
+    intent: parseIntentDeterministically(customerMessage, context),
     status: "deterministic_fallback",
   };
 }
