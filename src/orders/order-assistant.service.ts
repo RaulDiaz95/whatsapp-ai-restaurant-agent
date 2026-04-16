@@ -1,4 +1,4 @@
-import { parseIntent } from "../ai/intent-parser";
+﻿import { parseIntent } from "../ai/intent-parser";
 import { generateFinalAssistantReply } from "../ai/response-generator.service";
 import { addItemToCart, clearCart, getCartTotal, removeItemFromCart, type CartState } from "../cart/cart.service";
 import { DeliveryService } from "../delivery/delivery.service";
@@ -23,7 +23,7 @@ function isAddressQuery(text: string): boolean {
   const msg = text.toLowerCase();
   return (
     msg.includes("direccion") ||
-    msg.includes("dirección") ||
+    msg.includes("direcciÃ³n") ||
     msg.includes("donde lo mandas") ||
     msg.includes("confirmar direccion") ||
     msg.includes("mi direccion")
@@ -32,23 +32,31 @@ function isAddressQuery(text: string): boolean {
 
 function isSavedAddressConfirmation(text: string): boolean {
   const msg = text.toLowerCase().trim();
-  return msg === "si" || msg === "sí" || msg === "correcto" || msg === "esa" || msg === "ok" || msg === "usar esa";
+  return (
+    msg.includes("si") ||
+    msg.includes("sí") ||
+    msg.includes("correcta") ||
+    msg.includes("correcto") ||
+    msg.includes("esa") ||
+    msg.includes("ok") ||
+    msg.includes("usar")
+  );
 }
 
 function isAddressChangeRequest(text: string): boolean {
   const msg = text.toLowerCase().trim();
-  return msg === "cambiar" || msg === "otra direccion" || msg === "otra dirección" || msg === "no";
+  return msg.includes("cambiar") || msg.includes("otra direccion") || msg.includes("otra dirección") || msg.includes("no");
 }
 
 function buildDeliverySummary(deliveryFee: number, etaMinutes: number, total: number): string {
   return [
-    "Perfecto 👍 ya tengo tu dirección.",
+    "Perfecto ðŸ‘ ya tengo tu direcciÃ³n.",
     "",
-    `🚚 Envío: $${deliveryFee}`,
-    `⏱️ Tiempo estimado: ${etaMinutes} min`,
-    `🧾 Total: $${total}`,
+    `ðŸšš EnvÃ­o: $${deliveryFee}`,
+    `â±ï¸ Tiempo estimado: ${etaMinutes} min`,
+    `ðŸ§¾ Total: $${total}`,
     "",
-    "¿Deseas continuar con tu pedido?",
+    "Â¿Deseas continuar con tu pedido?",
   ].join("\n");
 }
 
@@ -133,7 +141,15 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         deliveryFee: quote.fee,
       };
       await persistSessionState(whatsappUserId, state);
-      return buildDeliverySummary(quote.fee, quote.etaMinutes, total);
+      return [
+        "Perfecto 🚀",
+        "",
+        `🚚 Envío: $${quote.fee}`,
+        `⏱️ Tiempo estimado: ${quote.etaMinutes} min`,
+        `💵 Total: $${total}`,
+        "",
+        "¿Deseas confirmar tu pedido?",
+      ].join("\n");
     }
 
     if (isAddressChangeRequest(customerMessage)) {
@@ -144,8 +160,10 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         deliveryFee: null,
       };
       await persistSessionState(whatsappUserId, state);
-      return "Claro, compárteme la nueva dirección y actualizo tu envío.";
+      return "Perfecto 👍 ¿Cuál es la nueva dirección de entrega?";
     }
+
+    return "¿Deseas usar esta dirección o prefieres cambiarla?";
   }
 
   if (state.awaitingAddress) {
@@ -167,10 +185,10 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
 
   if (isAddressQuery(customerMessage)) {
     if (state.address) {
-      return `📍 Esta es la dirección que tengo registrada:\n${state.address}\n\n¿Deseas usar esta dirección para tu pedido?`;
+      return `ðŸ“ Esta es la direcciÃ³n que tengo registrada:\n${state.address}\n\nÂ¿Deseas usar esta direcciÃ³n para tu pedido?`;
     }
 
-    return "Aún no tengo una dirección registrada. ¿Me la puedes compartir por favor?";
+    return "AÃºn no tengo una direcciÃ³n registrada. Â¿Me la puedes compartir por favor?";
   }
 
   const { intent, status } = await parseIntent(customerMessage, {
@@ -219,7 +237,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         deliveryFee: null,
       };
       await persistSessionState(whatsappUserId, state);
-      return "Listo 🧹 tu carrito quedó vacío";
+      return "Listo ðŸ§¹ tu carrito quedÃ³ vacÃ­o";
 
     case "recommend":
       return buildFinalReply({
@@ -232,7 +250,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
 
     case "checkout":
       if (state.cart.items.length === 0) {
-        return "No tienes productos en tu carrito aún 😅 ¿Te gustaría ver el menú?";
+        return "No tienes productos en tu carrito aÃºn ðŸ˜… Â¿Te gustarÃ­a ver el menÃº?";
       }
 
       state = {
@@ -248,7 +266,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
           awaitingAddressConfirmation: true,
         };
         await persistSessionState(whatsappUserId, state);
-        return `📍 Tengo esta dirección registrada:\n${state.address}\n\n¿Quieres usar esta dirección o prefieres cambiarla?`;
+        return `ðŸ“ Tengo esta direcciÃ³n registrada:\n${state.address}\n\nÂ¿Quieres usar esta direcciÃ³n o prefieres cambiarla?`;
       }
 
       state = {
@@ -256,7 +274,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         awaitingAddress: true,
       };
       await persistSessionState(whatsappUserId, state);
-      return "Perfecto 👍 para continuar con tu pedido, ¿me puedes compartir tu dirección de entrega?";
+      return "Perfecto ðŸ‘ para continuar con tu pedido, Â¿me puedes compartir tu direcciÃ³n de entrega?";
 
     case "add_to_cart": {
       if (intent.items.length === 0) {
@@ -303,7 +321,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         lastMentionedItem: intent.items[0]?.name ?? state.lastMentionedItem,
       };
       await persistSessionState(whatsappUserId, state);
-      return ["Agregué:", ...addedLines].join("\n");
+      return ["AgreguÃ©:", ...addedLines].join("\n");
     }
 
     case "remove_item": {
@@ -344,7 +362,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
         lastMentionedItem: intent.items[0]?.name ?? state.lastMentionedItem,
       };
       await persistSessionState(whatsappUserId, state);
-      return ["Quité:", ...removedLines].join("\n");
+      return ["QuitÃ©:", ...removedLines].join("\n");
     }
 
     case "unknown":
@@ -371,3 +389,4 @@ export async function getStoredCart(whatsappUserId: string): Promise<CartState> 
 export function getCartSummaryTotal(cart: CartState): number {
   return getCartTotal(cart);
 }
+

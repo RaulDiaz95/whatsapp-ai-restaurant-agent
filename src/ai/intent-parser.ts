@@ -87,6 +87,22 @@ function normalizeIntent(input: unknown): ParsedIntent {
   };
 }
 
+function withFallbackItems(aiIntent: ParsedIntent, fallbackItems: ParsedIntentItem[]): ParsedIntent {
+  if (aiIntent.items.length > 0 || fallbackItems.length === 0) {
+    return aiIntent;
+  }
+
+  return {
+    ...aiIntent,
+    items: fallbackItems.map((item) => ({
+      name: item.name,
+      quantity: item.quantity,
+      extras: [...item.extras],
+      removals: [...item.removals],
+    })),
+  };
+}
+
 function getOpenAiApiKey(): string | null {
   const apiKey = process.env.OPENAI_API_KEY;
   console.log("OPENAI KEY:", apiKey && apiKey.trim().length > 0 ? "EXISTS" : "MISSING");
@@ -377,8 +393,10 @@ export async function parseIntent(customerMessage: string, context?: IntentParse
   try {
     const aiIntent = await parseIntentWithOpenAI(customerMessage);
     if (aiIntent) {
+      const normalizedIntent = withFallbackItems(aiIntent, contextIntent.items);
+      console.log("PARSED ITEMS:", normalizedIntent.items);
       return {
-        intent: aiIntent,
+        intent: normalizedIntent,
         status: "used_openai",
       };
     }
@@ -391,6 +409,7 @@ export async function parseIntent(customerMessage: string, context?: IntentParse
     };
   }
 
+  console.log("PARSED ITEMS:", contextIntent.items);
   return {
     intent: parseIntentDeterministically(customerMessage, context),
     status: "deterministic_fallback",
