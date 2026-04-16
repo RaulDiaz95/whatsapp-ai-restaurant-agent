@@ -8,6 +8,7 @@ export type SessionContext = {
   cart?: CartState;
   awaitingAddress?: boolean;
   address?: string | null;
+  deliveryFee?: number | null;
 };
 
 function readContext(session: Session): SessionContext {

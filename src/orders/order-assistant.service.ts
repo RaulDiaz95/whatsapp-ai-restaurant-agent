@@ -1,6 +1,7 @@
 import { parseIntent } from "../ai/intent-parser";
 import { generateFinalAssistantReply } from "../ai/response-generator.service";
 import { addItemToCart, getCartTotal, removeItemFromCart, type CartState } from "../cart/cart.service";
+import { DeliveryService } from "../delivery/delivery.service";
 import { getCartFromSession, getOrCreateActiveSession, getSessionContext, saveSessionContext, type SessionContext } from "../sessions/session.repository";
 import { findOrCreateUserByWhatsappId } from "../users/user.repository";
 
@@ -8,17 +9,20 @@ type LocalSessionState = {
   cart: CartState;
   awaitingAddress: boolean;
   address: string | null;
+  deliveryFee: number | null;
 };
 
 const memorySessionStore = new Map<string, LocalSessionState>();
 const AI_MISSING_MESSAGE = "IA no configurada correctamente.";
 const AI_FAILURE_MESSAGE = "Lo siento, tuve un problema procesando tu mensaje. Podrias intentar de nuevo?";
+const deliveryService = new DeliveryService();
 
 function toLocalSessionState(context?: SessionContext): LocalSessionState {
   return {
     cart: context?.cart ?? { items: [] },
     awaitingAddress: context?.awaitingAddress ?? false,
     address: context?.address ?? null,
+    deliveryFee: context?.deliveryFee ?? null,
   };
 }
 
@@ -32,6 +36,7 @@ async function persistSessionState(whatsappUserId: string, state: LocalSessionSt
       cart: state.cart,
       awaitingAddress: state.awaitingAddress,
       address: state.address,
+      deliveryFee: state.deliveryFee,
     });
   } catch {
     // Keep the conversation working even if persistence is temporarily unavailable.
@@ -78,19 +83,27 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
   let state = await getStoredSessionState(whatsappUserId);
 
   if (state.awaitingAddress) {
+    const address = customerMessage.trim();
+    const quote = deliveryService.getQuote(address);
+    const cartTotal = getCartTotal(state.cart);
+    const total = cartTotal + quote.fee;
+
     state = {
       ...state,
       awaitingAddress: false,
-      address: customerMessage.trim(),
+      address,
+      deliveryFee: quote.fee,
     };
     await persistSessionState(whatsappUserId, state);
-    return buildFinalReply({
-      userMessage: customerMessage,
-      intent: "checkout",
-      actionSummary: `Address captured for checkout: ${state.address}`,
-      state,
-      extraContext: "The customer has provided the delivery address. Confirm it naturally and say payment is the next step.",
-    });
+    return [
+      "Perfecto 👍 ya tengo tu dirección.",
+      "",
+      `🚚 Envío: $${quote.fee}`,
+      `⏱️ Tiempo estimado: ${quote.etaMinutes} min`,
+      `🧾 Total: $${total}`,
+      "",
+      "¿Deseas continuar con tu pedido?",
+    ].join("\n");
   }
 
   const { intent, status } = await parseIntent(customerMessage);
@@ -145,6 +158,7 @@ export async function handleOrderingMessage(whatsappUserId: string, customerMess
       state = {
         ...state,
         awaitingAddress: true,
+        deliveryFee: null,
       };
       await persistSessionState(whatsappUserId, state);
       return buildFinalReply({
